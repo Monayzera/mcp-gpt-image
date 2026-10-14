@@ -107,12 +107,18 @@ The Codex model and reasoning effort do not draw the image. The model matters mo
 | Variable | Purpose |
 | --- | --- |
 | `CODEX_PATH` | Full path to the `codex` executable. Replaces the automatic search. |
+| `GPT_IMAGE_MODEL` | Default Codex model for every call, e.g. `gpt-6-astra`. A `model` argument in the call wins. |
+| `GPT_IMAGE_EFFORT` | Default reasoning effort, e.g. `max`. A `reasoning_effort` argument in the call wins. |
 
 The automatic search checks `PATH`, then common install folders: the official installer folder (`~/.local/bin`, or `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin` on Windows), npm global, nvm, pnpm, Volta, Bun, asdf and Homebrew.
 
 ```bash
-claude mcp add --scope user gpt-image -e CODEX_PATH=/opt/codex/bin/codex -- npx -y github:Monayzera/mcp-gpt-image
+claude mcp add --scope user gpt-image -e GPT_IMAGE_MODEL=gpt-6-astra -e GPT_IMAGE_EFFORT=max -- npx -y github:Monayzera/mcp-gpt-image
 ```
+
+`setup` passes `CODEX_PATH`, `GPT_IMAGE_MODEL` and `GPT_IMAGE_EFFORT` to the server when they are set in your shell.
+
+In `exact` mode the Codex model only relays the prompt. In testing, the same prompt with `gpt-6-astra` and effort `max` used about 4% of the 5-hour window, against about 1% with the default model and effort `low`, and the image was not better.
 
 ## Troubleshooting
 
