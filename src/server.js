@@ -1,11 +1,13 @@
 import { createRequire } from "node:module";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { closeAppServer, getAppServer } from "./app-server.js";
 import { formatRateLimits } from "./format.js";
+import { resolveReferenceImages } from "./files.js";
 import { envDefaults, generateImages, withEnvDefaults } from "./generate.js";
 import { CodexNotFoundError, findCodex, INSTALL_HINT } from "./locate.js";
 
@@ -18,6 +20,7 @@ const SERVER_INSTRUCTIONS = [
   "There is no size parameter: state the aspect ratio in the prompt (for example \"16:9 landscape\").",
   "Results include the saved file paths and the usage limits Codex reports (5-hour and weekly windows).",
   "Call codex_status to check the setup, the usage limits, and which models and reasoning efforts are available.",
+  "To keep working while an image renders, call generate_image with background: true and collect it later with get_image_result.",
 ].join("\n");
 
 const server = new McpServer({ name: "gpt-image", version: pkg.version }, { instructions: SERVER_INSTRUCTIONS });
@@ -63,6 +66,124 @@ function errorResult(err) {
   return { isError: true, content: [{ type: "text", text: message }] };
 }
 
+async function runGeneration(args, { signal, onProgress } = {}) {
+  const since = Date.now();
+  let client = null;
+  try {
+    client = await getAppServer(CLIENT_INFO);
+    const baseDir = await projectDir();
+    const result = await generateImages({ client, params: withEnvDefaults(args), baseDir, signal, onProgress });
+
+    const header = [
+      result.images.length < result.requested
+        ? `Generated ${result.images.length} of ${result.requested} requested images with GPT Image via Codex`
+        : `Generated ${result.images.length} image${result.images.length > 1 ? "s" : ""} with GPT Image via Codex`,
+      `(model ${result.model ?? "from Codex config"}${result.effort ? `, effort ${result.effort}` : ""}, prompt_mode ${result.mode}) in ${Math.round(result.durationMs / 1000)}s.`,
+    ].join(" ");
+    const lines = [header, ""];
+    result.images.forEach((img, i) => {
+      const dims = img.size ? `${img.size.width}x${img.size.height}, ` : "";
+      lines.push(`Image ${i + 1}: ${img.path} (${dims}${formatBytes(img.bytes)})`);
+      if (result.mode === "exact" && img.verbatim === true) {
+        lines.push("Prompt that reached GPT Image: identical to yours.");
+      } else if (img.revisedPrompt) {
+        const note = result.mode === "exact" ? " (differs from yours)" : "";
+        lines.push(`Prompt that reached GPT Image${note}:\n${img.revisedPrompt}`);
+      } else {
+        lines.push("Prompt that reached GPT Image: not reported by Codex.");
+      }
+      if (result.transparent) {
+        if (img.alpha === true) lines.push("Transparent background: alpha channel present.");
+        else if (img.alpha === false) lines.push("Transparent background requested, but this image has NO alpha channel.");
+        else lines.push("Transparent background requested; alpha channel could not be checked for this format.");
+      }
+    });
+    if (result.failures.length) lines.push("", "Not generated:", ...result.failures.map(f => `- ${f}`));
+    lines.push("", ...(await limitLines(client, since)));
+
+    return {
+      content: [
+        { type: "text", text: lines.join("\n") },
+        ...result.images.map(img => ({ type: "image", data: img.data, mimeType: img.mimeType })),
+      ],
+    };
+  } catch (err) {
+    log("image generation failed:", err?.stack ?? err);
+    const result = errorResult(err);
+    if (client && !client.closed) {
+      const limits = await limitLines(client, since).catch(() => []);
+      if (limits.length) result.content[0].text += `\n\n${limits.join("\n")}`;
+    }
+    return result;
+  }
+}
+
+const JOB_TTL_MS = 60 * 60_000;
+const MAX_RUNNING_JOBS = 4;
+const jobs = new Map();
+
+function runningJobs() {
+  return [...jobs.values()].filter(j => j.status === "running").length;
+}
+
+function newJobId() {
+  let id;
+  do id = randomUUID().replaceAll("-", "").slice(0, 16);
+  while (jobs.has(id));
+  return id;
+}
+
+function startJob(args) {
+  const id = newJobId();
+  const job = { id, status: "running", startedAt: Date.now(), finishedAt: null, progress: "Starting Codex", result: null, delivered: false };
+  job.promise = runGeneration(args, { onProgress: ({ message }) => (job.progress = message) })
+    .catch(err => errorResult(err))
+    .then(result => {
+      job.result = result;
+      job.status = result.isError ? "failed" : "done";
+      job.finishedAt = Date.now();
+      setTimeout(() => jobs.delete(id), JOB_TTL_MS).unref();
+    });
+  jobs.set(id, job);
+  return job;
+}
+
+function waitFor(promise, ms, signal) {
+  return new Promise(resolve => {
+    let timer = null;
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    if (signal?.aborted) {
+      done();
+      return;
+    }
+    timer = setTimeout(done, ms);
+    promise.then(done, done);
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
+
+function collectJob(job) {
+  if (!job.delivered) {
+    job.delivered = true;
+    const result = job.result;
+    job.result = {
+      ...result,
+      content: [
+        {
+          type: "text",
+          text: `${result.content.find(c => c.type === "text")?.text ?? ""}\n\n(Images of job ${job.id} were already returned once; open the saved files above to see them again.)`,
+        },
+      ],
+    };
+    return result;
+  }
+  return job.result;
+}
+
 server.registerTool(
   "generate_image",
   {
@@ -70,6 +191,7 @@ server.registerTool(
     description: [
       "Generate or edit images with GPT Image through the local Codex CLI and return them inline, saved to disk.",
       "Pass reference_images to edit existing images or to use them as style/subject references.",
+      "Set background: true to get a job id at once and keep working; the images then come from get_image_result.",
       "Takes about 30-90 seconds per image. There is no size parameter: put the aspect ratio in the prompt (for example \"16:9 landscape\", \"square 1:1\", \"vertical 9:16\").",
       "The result lists each saved file path and size, the prompt that reached GPT Image, an alpha-channel check when a transparent background was requested, and the usage limits Codex reports.",
     ].join(" "),
@@ -106,10 +228,39 @@ server.registerTool(
         .min(1)
         .optional()
         .describe("Where to save: a directory, or a file path such as hero.png (the name is kept; the extension follows the format returned, normally PNG). Relative paths resolve against the project directory; ~ is expanded. Default: <project>/generated-images/. Existing files are never overwritten; a numeric suffix is added instead."),
+      background: z
+        .boolean()
+        .default(false)
+        .describe("Return immediately with a job id and keep generating in the background, so you can do other work. Collect the images later with get_image_result."),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
   async (args, extra) => {
+    const { background, ...params } = args;
+    if (background) {
+      if (runningJobs() >= MAX_RUNNING_JOBS) {
+        return errorResult(new Error(`${MAX_RUNNING_JOBS} background jobs are already running. Collect one with get_image_result before starting another.`));
+      }
+      try {
+        await resolveReferenceImages(params.reference_images, await projectDir());
+      } catch (err) {
+        return errorResult(err);
+      }
+      const job = startJob(params);
+      return {
+        content: [
+          {
+            type: "text",
+            text: [
+              `Started background job ${job.id}.`,
+              "Generation keeps running in the MCP server while you do other work (about 30-90 s per image).",
+              `Call get_image_result with job_id "${job.id}" to collect the images. wait_seconds waits up to that long and returns as soon as the job finishes.`,
+              "Errors such as an unknown model or a usage limit are reported when you collect the result.",
+            ].join("\n"),
+          },
+        ],
+      };
+    }
     const progressToken = extra?._meta?.progressToken;
     const onProgress = ({ progress, total, message }) => {
       if (progressToken === undefined) return;
@@ -117,55 +268,44 @@ server.registerTool(
         .sendNotification({ method: "notifications/progress", params: { progressToken, progress, total, message } })
         .catch(() => {});
     };
-    const since = Date.now();
-    let client = null;
-    try {
-      client = await getAppServer(CLIENT_INFO);
-      const baseDir = await projectDir();
-      const result = await generateImages({ client, params: withEnvDefaults(args), baseDir, signal: extra?.signal, onProgress });
+    return runGeneration(params, { signal: extra?.signal, onProgress });
+  }
+);
 
-      const header = [
-        result.images.length < result.requested
-          ? `Generated ${result.images.length} of ${result.requested} requested images with GPT Image via Codex`
-          : `Generated ${result.images.length} image${result.images.length > 1 ? "s" : ""} with GPT Image via Codex`,
-        `(model ${result.model ?? "from Codex config"}${result.effort ? `, effort ${result.effort}` : ""}, prompt_mode ${result.mode}) in ${Math.round(result.durationMs / 1000)}s.`,
-      ].join(" ");
-      const lines = [header, ""];
-      result.images.forEach((img, i) => {
-        const dims = img.size ? `${img.size.width}x${img.size.height}, ` : "";
-        lines.push(`Image ${i + 1}: ${img.path} (${dims}${formatBytes(img.bytes)})`);
-        if (result.mode === "exact" && img.verbatim === true) {
-          lines.push("Prompt that reached GPT Image: identical to yours.");
-        } else if (img.revisedPrompt) {
-          const note = result.mode === "exact" ? " (differs from yours)" : "";
-          lines.push(`Prompt that reached GPT Image${note}:\n${img.revisedPrompt}`);
-        } else {
-          lines.push("Prompt that reached GPT Image: not reported by Codex.");
-        }
-        if (result.transparent) {
-          if (img.alpha === true) lines.push("Transparent background: alpha channel present.");
-          else if (img.alpha === false) lines.push("Transparent background requested, but this image has NO alpha channel.");
-          else lines.push("Transparent background requested; alpha channel could not be checked for this format.");
-        }
-      });
-      if (result.failures.length) lines.push("", "Not generated:", ...result.failures.map(f => `- ${f}`));
-      lines.push("", ...(await limitLines(client, since)));
-
-      return {
-        content: [
-          { type: "text", text: lines.join("\n") },
-          ...result.images.map(img => ({ type: "image", data: img.data, mimeType: img.mimeType })),
-        ],
-      };
-    } catch (err) {
-      log("generate_image failed:", err?.stack ?? err);
-      const result = errorResult(err);
-      if (client && !client.closed) {
-        const limits = await limitLines(client, since).catch(() => []);
-        if (limits.length) result.content[0].text += `\n\n${limits.join("\n")}`;
-      }
-      return result;
+server.registerTool(
+  "get_image_result",
+  {
+    title: "Get background image result",
+    description:
+      "Collect the result of a generate_image call started with background: true. When the job is done it returns the same text and images as a normal call (images only the first time; later calls return the text and file paths). While it runs it returns its status. Finished jobs are kept for 1 hour and are lost if the MCP server restarts.",
+    inputSchema: {
+      job_id: z.string().min(1).describe("The job id returned by generate_image with background: true."),
+      wait_seconds: z
+        .number()
+        .int()
+        .min(0)
+        .max(600)
+        .default(0)
+        .describe("Wait up to this many seconds; returns as soon as the job finishes. 0 returns the current status immediately."),
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  async ({ job_id, wait_seconds }, extra) => {
+    const job = jobs.get(job_id);
+    if (!job) {
+      return errorResult(new Error(`Unknown job "${job_id}". Jobs are kept for 1 hour and are lost if the MCP server restarts.`));
     }
+    if (job.status === "running" && wait_seconds > 0) await waitFor(job.promise, wait_seconds * 1000, extra?.signal);
+    if (job.status !== "running") return collectJob(job);
+    const elapsed = Math.round((Date.now() - job.startedAt) / 1000);
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Job ${job.id} is still running (${elapsed}s so far). Last progress: ${job.progress}. Call get_image_result again later.`,
+        },
+      ],
+    };
   }
 );
 
