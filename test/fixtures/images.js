@@ -12,7 +12,7 @@ function crc32(buffer) {
   return (c ^ 0xffffffff) >>> 0;
 }
 
-function pngChunk(type, data) {
+export function pngChunk(type, data) {
   const length = Buffer.alloc(4);
   length.writeUInt32BE(data.length);
   const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
@@ -33,17 +33,22 @@ function le32(value) {
   return b;
 }
 
-export function makePng(width = 3, height = 2) {
+export function makePng(width = 3, height = 2, { colorType = 2, trns = false } = {}) {
+  const channels = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[colorType] ?? 3;
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(width, 0);
   ihdr.writeUInt32BE(height, 4);
   ihdr[8] = 8;
-  ihdr[9] = 2;
-  const row = Buffer.concat([Buffer.from([0]), Buffer.alloc(width * 3, 0x7f)]);
+  ihdr[9] = colorType;
+  const row = Buffer.concat([Buffer.from([0]), Buffer.alloc(width * channels, 0x7f)]);
   const raw = Buffer.concat(Array.from({ length: height }, () => row));
+  const beforeData = [];
+  if (colorType === 3) beforeData.push(pngChunk("PLTE", Buffer.alloc(3, 0x7f)));
+  if (trns) beforeData.push(pngChunk("tRNS", Buffer.alloc(colorType === 0 ? 2 : colorType === 2 ? 6 : 1, 0)));
   return Buffer.concat([
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     pngChunk("IHDR", ihdr),
+    ...beforeData,
     pngChunk("IDAT", zlib.deflateSync(raw)),
     pngChunk("IEND", Buffer.alloc(0)),
   ]);

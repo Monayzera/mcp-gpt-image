@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn as spawnProcess } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +10,7 @@ import { makePng } from "./fixtures/images.js";
 import { cleanup, fakeEnv, makeCodexWrapper, makeTmp, readLog, waitFor } from "./support.js";
 
 const INDEX = fileURLToPath(new URL("../src/index.js", import.meta.url));
+const SKILL_SOURCE = fileURLToPath(new URL("../skill/SKILL.md", import.meta.url));
 
 afterEach(cleanup);
 
@@ -21,14 +23,14 @@ function alive(pid) {
   }
 }
 
-async function withServer(scenario, extraEnv, fn) {
+async function withServer(scenario, extraEnv, fn, serverArgs = []) {
   const root = await makeTmp();
   const project = path.join(root, "project");
   await fs.mkdir(project);
   const logFile = path.join(root, "fake.log");
   const wrapper = await makeCodexWrapper(root);
   const env = fakeEnv({ ...process.env, CODEX_PATH: wrapper, CLAUDE_PROJECT_DIR: project }, scenario, { FAKE_LOG: logFile, ...extraEnv });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [INDEX], env, stderr: "pipe" });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [INDEX, ...serverArgs], env, stderr: "pipe" });
   const stderr = [];
   transport.stderr?.on("data", chunk => stderr.push(String(chunk)));
   const client = new Client({ name: "e2e-test", version: "0.0.0" });
@@ -64,6 +66,18 @@ describe("MCP server over stdio", { skip: process.platform === "win32" }, () => 
       assert.equal(generate.annotations.readOnlyHint, false);
       assert.equal(tools.find(t => t.name === "codex_status").annotations.readOnlyHint, true);
     });
+  });
+
+  it("starts the MCP server for any first argument that is not setup or uninstall", async () => {
+    await withServer(
+      "ok",
+      {},
+      async ({ client }) => {
+        const { tools } = await client.listTools();
+        assert.deepEqual(tools.map(t => t.name).sort(), ["codex_status", "generate_image"]);
+      },
+      ["--stdio"]
+    );
   });
 
   it("codex_status reports path, version, sign-in, limits, config and models", async () => {
@@ -145,7 +159,7 @@ describe("MCP server over stdio", { skip: process.platform === "win32" }, () => 
 
   it("generate_image rejects arguments that violate the schema", async () => {
     await withServer("ok", {}, async ({ client }) => {
-      for (const args of [{ prompt: "" }, { prompt: "x", count: 9 }, {}]) {
+      for (const args of [{ prompt: "" }, { prompt: "   " }, { prompt: "\n\t \r\n" }, { prompt: "x", count: 9 }, {}]) {
         let outcome;
         try {
           outcome = await client.callTool({ name: "generate_image", arguments: args });
@@ -154,6 +168,140 @@ describe("MCP server over stdio", { skip: process.platform === "win32" }, () => 
         }
         assert.equal(outcome.isError, true, JSON.stringify(args));
       }
+    });
+  });
+
+  it("generate_image does not reach Codex for a whitespace-only prompt", async () => {
+    await withServer("ok", {}, async ({ client, logFile }) => {
+      let outcome;
+      try {
+        outcome = await client.callTool({ name: "generate_image", arguments: { prompt: "   " } });
+      } catch (err) {
+        outcome = { isError: true, content: [{ type: "text", text: err.message }] };
+      }
+      assert.equal(outcome.isError, true);
+      assert.match(textOf(outcome), /prompt must not be empty/);
+      const sent = (await readLog(logFile)).filter(m => m.method === "turn/start");
+      assert.equal(sent.length, 0);
+    });
+  });
+
+  it("generate_image sends the prompt to Codex without trimming it", async () => {
+    await withServer("ok", {}, async ({ client, logFile }) => {
+      const prompt = "  A red fox \n";
+      const result = await client.callTool({ name: "generate_image", arguments: { prompt } });
+      assert.notEqual(result.isError, true, textOf(result));
+      const [turn] = (await readLog(logFile)).filter(m => m.method === "turn/start");
+      assert.equal(turn.params.input[0].text, prompt);
+      assert.ok(textOf(result).includes("Prompt that reached GPT Image: identical to yours."), textOf(result));
+    });
+  });
+
+  it("generate_image reports a trailing space added by Codex as a difference", async () => {
+    await withServer("ok", { FAKE_REVISED: "A red fox " }, async ({ client }) => {
+      const result = await client.callTool({ name: "generate_image", arguments: { prompt: "A red fox" } });
+      assert.ok(textOf(result).includes("Prompt that reached GPT Image (differs from yours):\nA red fox "), textOf(result));
+    });
+  });
+
+  it("generate_image says the model comes from the Codex config when Codex reports none", async () => {
+    await withServer("ok", { FAKE_THREAD_MODEL: "none" }, async ({ client }) => {
+      const result = await client.callTool({ name: "generate_image", arguments: { prompt: "A red fox" } });
+      assert.notEqual(result.isError, true, textOf(result));
+      assert.match(textOf(result), /^Generated 1 image with GPT Image via Codex \(model from Codex config, prompt_mode exact\) in \d+s\./);
+    });
+  });
+
+  it("generate_image says the prompt was not reported when Codex returns no revised prompt", async () => {
+    await withServer("norevised", {}, async ({ client }) => {
+      const result = await client.callTool({ name: "generate_image", arguments: { prompt: "A red fox" } });
+      assert.notEqual(result.isError, true, textOf(result));
+      assert.ok(textOf(result).includes("Prompt that reached GPT Image: not reported by Codex."), textOf(result));
+    });
+  });
+
+  it("generate_image confirms the alpha channel when a transparent background was requested", async () => {
+    await withServer("ok", { FAKE_PNG_COLOR_TYPE: "6" }, async ({ client }) => {
+      const result = await client.callTool({ name: "generate_image", arguments: { prompt: "A red fox", transparent_background: true } });
+      assert.notEqual(result.isError, true, textOf(result));
+      assert.ok(textOf(result).includes("Transparent background: alpha channel present."), textOf(result));
+      assert.ok(!textOf(result).includes("NO alpha channel"));
+    });
+  });
+
+  it("generate_image warns when the transparent image has no alpha channel", async () => {
+    await withServer("ok", {}, async ({ client }) => {
+      const result = await client.callTool({ name: "generate_image", arguments: { prompt: "A red fox", transparent_background: true } });
+      assert.ok(textOf(result).includes("Transparent background requested, but this image has NO alpha channel."), textOf(result));
+    });
+  });
+
+  it("generate_image says the alpha channel could not be checked for a jpeg", async () => {
+    await withServer("ok", { FAKE_IMAGE_FORMAT: "jpeg" }, async ({ client, project }) => {
+      const result = await client.callTool({ name: "generate_image", arguments: { prompt: "A red fox", transparent_background: true } });
+      assert.notEqual(result.isError, true, textOf(result));
+      assert.ok(textOf(result).includes("Transparent background requested; alpha channel could not be checked for this format."), textOf(result));
+      const files = await fs.readdir(path.join(project, "generated-images"));
+      assert.match(files[0], /\.jpg$/);
+      assert.equal(result.content.find(c => c.type === "image").mimeType, "image/jpeg");
+    });
+  });
+
+  it("generate_image prints no transparency line when it was not requested", async () => {
+    await withServer("ok", { FAKE_PNG_COLOR_TYPE: "6" }, async ({ client }) => {
+      const result = await client.callTool({ name: "generate_image", arguments: { prompt: "A red fox" } });
+      assert.ok(!textOf(result).includes("Transparent background"), textOf(result));
+    });
+  });
+
+  it("generate_image reports a transparency line per image for count 2", async () => {
+    await withServer("count2", { FAKE_PNG_COLOR_TYPE: "6" }, async ({ client }) => {
+      const result = await client.callTool({ name: "generate_image", arguments: { prompt: "Two foxes", count: 2, transparent_background: true } });
+      assert.equal(textOf(result).match(/Transparent background: alpha channel present\./g).length, 2);
+    });
+  });
+
+  it("generate_image returns the saved image and lists the one that could not be saved", async () => {
+    const dir = await makeTmp();
+    const missing = path.join(dir, "gone.png");
+    await withServer("savedpath", { FAKE_COUNT: "2", FAKE_BAD_ONLY_FIRST: "1", FAKE_SAVED_PATH: missing }, async ({ client, project }) => {
+      const result = await client.callTool({ name: "generate_image", arguments: { prompt: "Two foxes", count: 2 } });
+      assert.notEqual(result.isError, true, textOf(result));
+      const text = textOf(result);
+      assert.match(text, /Generated 1 of 2 requested images/);
+      assert.match(text, /Not generated:\n- Image 1 could not be saved: .*ENOENT/);
+      assert.equal(result.content.filter(c => c.type === "image").length, 1);
+      assert.equal((await fs.readdir(path.join(project, "generated-images"))).length, 1);
+    });
+  });
+
+  it("generate_image appends the usage limits to an error result while Codex is alive", async () => {
+    await withServer("noimage", {}, async ({ client }) => {
+      const result = await client.callTool({ name: "generate_image", arguments: { prompt: "A red fox" } });
+      assert.equal(result.isError, true);
+      const text = textOf(result);
+      assert.match(text, /without generating/);
+      assert.ok(text.includes("\n\nUsage limits (ChatGPT plus):\n"), text);
+      assert.match(text, /- 5h: 90% left/);
+      assert.ok(text.indexOf("without generating") < text.indexOf("Usage limits"));
+    });
+  });
+
+  it("generate_image appends the usage limits when the image quota is exhausted", async () => {
+    await withServer("fail_limit", {}, async ({ client }) => {
+      const result = await client.callTool({ name: "generate_image", arguments: { prompt: "A red fox" } });
+      assert.equal(result.isError, true);
+      assert.match(textOf(result), /Image generation usage limit reached \(images\)\./);
+      assert.match(textOf(result), /Usage limits \(ChatGPT plus\):/);
+    });
+  });
+
+  it("generate_image adds no usage limit lines to an error when Codex died", async () => {
+    await withServer("crash_midturn", {}, async ({ client }) => {
+      const result = await client.callTool({ name: "generate_image", arguments: { prompt: "A red fox" } });
+      assert.equal(result.isError, true);
+      assert.match(textOf(result), /Codex app-server stopped \(exit code 3/);
+      assert.doesNotMatch(textOf(result), /Usage limits/);
     });
   });
 
@@ -185,5 +333,177 @@ describe("MCP server over stdio", { skip: process.platform === "win32" }, () => 
       await stop();
       await waitFor(() => !alive(started.pid), { timeoutMs: 6000, label: "fake codex exit" });
     });
+  });
+});
+
+const FAKE_CLAUDE_SCRIPT = [
+  "#!/bin/sh",
+  'echo "$*" >> "$FAKE_CLAUDE_LOG"',
+  'if [ "$1" = "mcp" ] && [ "$2" = "get" ]; then exit "${FAKE_CLAUDE_GET:-1}"; fi',
+  'exit "${FAKE_CLAUDE_ACTION:-0}"',
+  "",
+].join("\n");
+
+async function cliSandbox({ claude = false, codex = false, extraEnv = {} } = {}) {
+  const root = await makeTmp("mcp-gpt-image-cli-");
+  const config = path.join(root, "claude-config");
+  const bin = path.join(root, "bin");
+  const home = path.join(root, "home");
+  const claudeLog = path.join(root, "claude.log");
+  await fs.mkdir(bin);
+  await fs.mkdir(home);
+  if (claude) await fs.writeFile(path.join(bin, "claude"), FAKE_CLAUDE_SCRIPT, { mode: 0o755 });
+  let codexPath = path.join(root, "missing-codex");
+  if (codex) {
+    const codexDir = path.join(root, "codex-bin");
+    await fs.mkdir(codexDir);
+    codexPath = await makeCodexWrapper(codexDir);
+  }
+  const env = fakeEnv(
+    { HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: config, PATH: bin, CODEX_PATH: codexPath, FAKE_CLAUDE_LOG: claudeLog, ...extraEnv },
+    "ok"
+  );
+  const skillFile = path.join(config, "skills", "gpt-image", "SKILL.md");
+  const claudeCalls = async () => {
+    try {
+      return (await fs.readFile(claudeLog, "utf8")).split("\n").filter(Boolean);
+    } catch {
+      return [];
+    }
+  };
+  return { root, config, bin, home, env, skillFile, codexPath, claudeCalls };
+}
+
+function runCli(args, env, timeoutMs = 30_000) {
+  return new Promise((resolve, reject) => {
+    const child = spawnProcess(process.execPath, [INDEX, ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`CLI ${args.join(" ")} timed out\nstdout: ${stdout}\nstderr: ${stderr}`));
+    }, timeoutMs);
+    child.stdout.on("data", chunk => (stdout += chunk));
+    child.stderr.on("data", chunk => (stderr += chunk));
+    child.on("error", err => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.on("close", code => {
+      clearTimeout(timer);
+      resolve({ code, stdout, stderr });
+    });
+  });
+}
+
+describe("setup and uninstall commands", { skip: process.platform === "win32" }, () => {
+  it("setup writes the skill and exits 1 with guidance when claude and codex are not found", async () => {
+    const box = await cliSandbox();
+    assert.deepEqual(await fs.readdir(box.bin), []);
+    const { code, stdout, stderr } = await runCli(["setup"], box.env);
+    assert.equal(code, 1, `${stdout}\n${stderr}`);
+    assert.deepEqual(await fs.readFile(box.skillFile), await fs.readFile(SKILL_SOURCE));
+    assert.ok(stdout.includes(`Skill:  ${box.skillFile}`), stdout);
+    assert.ok(stdout.includes("Claude Code CLI not found"), stdout);
+    assert.ok(stdout.includes("claude mcp add --scope user gpt-image -- npx -y github:Monayzera/mcp-gpt-image"), stdout);
+    assert.ok(stdout.includes("Codex:  not found"), stdout);
+    assert.ok(stdout.includes("npm install -g @openai/codex"), stdout);
+    assert.ok(stdout.includes("Finish the steps above, then restart Claude Code."), stdout);
+    assert.deepEqual(await box.claudeCalls(), []);
+    await assert.rejects(fs.stat(path.join(box.home, ".claude")), { code: "ENOENT" });
+  });
+
+  it("setup registers the server through claude and exits 0 when codex is signed in", async () => {
+    const box = await cliSandbox({ claude: true, codex: true });
+    const { code, stdout, stderr } = await runCli(["setup"], box.env);
+    assert.equal(code, 0, `${stdout}\n${stderr}`);
+    assert.ok(stdout.includes(`Skill:  ${box.skillFile}`), stdout);
+    assert.ok(stdout.includes('MCP:    "gpt-image" added to Claude Code (user scope)'), stdout);
+    assert.ok(stdout.includes(`Codex:  ${box.codexPath} (9.9.9, ChatGPT plus)`), stdout);
+    assert.ok(stdout.includes("Done. Restart Claude Code to load the skill and the MCP server."), stdout);
+    assert.deepEqual(await box.claudeCalls(), [
+      "mcp get gpt-image",
+      "mcp add --scope user gpt-image -- npx -y github:Monayzera/mcp-gpt-image",
+    ]);
+    assert.deepEqual(await fs.readFile(box.skillFile), await fs.readFile(SKILL_SOURCE));
+  });
+
+  it("setup leaves an existing registration unchanged", async () => {
+    const box = await cliSandbox({ claude: true, codex: true, extraEnv: { FAKE_CLAUDE_GET: "0" } });
+    const { code, stdout, stderr } = await runCli(["setup"], box.env);
+    assert.equal(code, 0, `${stdout}\n${stderr}`);
+    assert.ok(stdout.includes('MCP:    "gpt-image" already registered, left unchanged'), stdout);
+    assert.deepEqual(await box.claudeCalls(), ["mcp get gpt-image"]);
+  });
+
+  it("setup exits 1 and prints the manual command when claude refuses to add the server", async () => {
+    const box = await cliSandbox({ claude: true, codex: true, extraEnv: { FAKE_CLAUDE_ACTION: "1" } });
+    const { code, stdout } = await runCli(["setup"], box.env);
+    assert.equal(code, 1);
+    assert.ok(stdout.includes("MCP:    registration failed:"), stdout);
+    assert.ok(stdout.includes("claude mcp add --scope user gpt-image -- npx -y github:Monayzera/mcp-gpt-image"), stdout);
+    assert.ok(stdout.includes("Finish the steps above, then restart Claude Code."), stdout);
+  });
+
+  it("setup exits 1 when codex is missing even though the server was registered", async () => {
+    const box = await cliSandbox({ claude: true });
+    const { code, stdout } = await runCli(["setup"], box.env);
+    assert.equal(code, 1);
+    assert.ok(stdout.includes('"gpt-image" added to Claude Code'), stdout);
+    assert.ok(stdout.includes("Codex:  not found"), stdout);
+  });
+
+  it("setup reports a failure and exits 1 when the config folder cannot be written", async () => {
+    const box = await cliSandbox();
+    await fs.writeFile(box.config, "a file where the config folder should be");
+    const { code, stderr } = await runCli(["setup"], box.env);
+    assert.equal(code, 1);
+    assert.match(stderr, /^mcp-gpt-image setup failed: /);
+  });
+
+  it("uninstall removes the skill and the registration and exits 0", async () => {
+    const box = await cliSandbox({ claude: true, extraEnv: { FAKE_CLAUDE_GET: "0" } });
+    await fs.mkdir(path.dirname(box.skillFile), { recursive: true });
+    await fs.copyFile(SKILL_SOURCE, box.skillFile);
+    const { code, stdout, stderr } = await runCli(["uninstall"], box.env);
+    assert.equal(code, 0, `${stdout}\n${stderr}`);
+    assert.ok(stdout.includes(`Skill:  removed from ${path.dirname(box.skillFile)}`), stdout);
+    assert.ok(stdout.includes('MCP:    "gpt-image" removed from Claude Code'), stdout);
+    assert.deepEqual(await box.claudeCalls(), ["mcp get gpt-image", "mcp remove gpt-image --scope user"]);
+    await assert.rejects(fs.stat(path.dirname(box.skillFile)), { code: "ENOENT" });
+  });
+
+  it("uninstall exits 0 when nothing is installed or registered", async () => {
+    const box = await cliSandbox({ claude: true });
+    const { code, stdout } = await runCli(["uninstall"], box.env);
+    assert.equal(code, 0);
+    assert.ok(stdout.includes("Skill:  not installed"), stdout);
+    assert.ok(stdout.includes('MCP:    "gpt-image" not registered'), stdout);
+    assert.deepEqual(await box.claudeCalls(), ["mcp get gpt-image"]);
+  });
+
+  it("uninstall removes the skill and prints the manual command when claude is not found", async () => {
+    const box = await cliSandbox();
+    await fs.mkdir(path.dirname(box.skillFile), { recursive: true });
+    await fs.copyFile(SKILL_SOURCE, box.skillFile);
+    const { code, stdout } = await runCli(["uninstall"], box.env);
+    assert.equal(code, 0);
+    assert.ok(stdout.includes("Claude Code CLI not found. Remove it manually: claude mcp remove gpt-image --scope user"), stdout);
+    await assert.rejects(fs.stat(box.skillFile), { code: "ENOENT" });
+  });
+
+  it("uninstall exits 1 when claude fails to remove the server", async () => {
+    const box = await cliSandbox({ claude: true, extraEnv: { FAKE_CLAUDE_GET: "0", FAKE_CLAUDE_ACTION: "1" } });
+    const { code, stdout } = await runCli(["uninstall"], box.env);
+    assert.equal(code, 1);
+    assert.ok(stdout.includes("MCP:    removal failed:"), stdout);
+  });
+
+  it("uninstall reports a failure and exits 1 when the skill folder cannot be inspected", async () => {
+    const box = await cliSandbox();
+    await fs.writeFile(box.config, "a file where the config folder should be");
+    const { code, stderr } = await runCli(["uninstall"], box.env);
+    assert.equal(code, 1);
+    assert.match(stderr, /^mcp-gpt-image uninstall failed: /);
   });
 });

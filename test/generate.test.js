@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
+import { EventEmitter } from "node:events";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { buildInstructions, chooseEffort, generateImages, TURN_TIMEOUT_MS, validateModel } from "../src/generate.js";
-import { makeGif, makePng } from "./fixtures/images.js";
+import { makeGif, makeJpeg, makePng } from "./fixtures/images.js";
 import { cleanup, makeTmp, session, waitFor } from "./support.js";
 
 afterEach(cleanup);
@@ -118,13 +119,27 @@ describe("validateModel", () => {
     });
   });
 
-  it("propagates a listModels failure", async () => {
+  it("skips validation when listModels fails", async () => {
+    let calls = 0;
     const client = {
       listModels: async () => {
+        calls += 1;
         throw new Error("list failed");
       },
     };
-    await assert.rejects(validateModel(client, "a"), /list failed/);
+    await validateModel(client, "anything");
+    assert.equal(calls, 1);
+  });
+
+  it("skips validation when the model list is empty or missing", async () => {
+    await validateModel({ listModels: async () => [] }, "anything");
+    await validateModel({ listModels: async () => null }, "anything");
+    await validateModel({ listModels: async () => undefined }, "anything");
+  });
+
+  it("still rejects an unknown model when the list has a single entry", async () => {
+    const single = { listModels: async () => [models[0]] };
+    await assert.rejects(validateModel(single, "zzz"), /Unknown Codex model "zzz"[\s\S]*a \(default\): low, high/);
   });
 });
 
@@ -201,7 +216,9 @@ describe("generateImages success", () => {
     assert.equal(result.model, "m-default");
     assert.equal(result.effort, "low");
     assert.equal(result.mode, "exact");
-    assert.equal(result.turnStatus, "completed");
+    assert.equal(result.transparent, false);
+    assert.ok(!("turnStatus" in result));
+    assert.ok(!("codexPath" in result));
     assert.equal(typeof result.durationMs, "number");
     assert.ok(result.durationMs >= 0);
 
@@ -212,7 +229,8 @@ describe("generateImages success", () => {
     assert.deepEqual(img.size, { width: 3, height: 2 });
     assert.equal(img.verbatim, true);
     assert.equal(img.revisedPrompt, "A red fox");
-    assert.equal(img.codexPath, null);
+    assert.equal(img.alpha, false);
+    assert.ok(!("codexPath" in img));
 
     const onDisk = await fs.readFile(img.path);
     assert.deepEqual(onDisk, makePng(3, 2));
@@ -255,9 +273,32 @@ describe("generateImages success", () => {
     assert.equal(img.revisedPrompt, "A red fox -- rewritten");
   });
 
-  it("treats line ending and outer whitespace differences as verbatim", async () => {
-    const s = await setup("ok", { FAKE_REVISED: "line one\nline two" });
-    const prompt = "  line one\r\nline two \n";
+  it("treats a line ending only difference as verbatim", async () => {
+    const s = await setup("ok", { FAKE_REVISED: "line one\nline two\nline three" });
+    const prompt = "line one\r\nline two\rline three";
+    const result = await gen(s, { prompt });
+    assert.equal(result.images[0].verbatim, true);
+    const [turn] = await sentTo(s, "turn/start");
+    assert.equal(turn.params.input[0].text, prompt);
+  });
+
+  it("flags a trailing space as a difference", async () => {
+    const s = await setup("ok", { FAKE_REVISED: "A red fox" });
+    const result = await gen(s, { prompt: "A red fox " });
+    assert.equal(result.images[0].verbatim, false);
+    assert.equal(result.images[0].revisedPrompt, "A red fox");
+  });
+
+  it("flags leading whitespace and a trailing newline as differences", async () => {
+    const leading = await setup("ok", { FAKE_REVISED: "A red fox" });
+    assert.equal((await gen(leading, { prompt: "  A red fox" })).images[0].verbatim, false);
+    const trailing = await setup("ok", { FAKE_REVISED: "A red fox" });
+    assert.equal((await gen(trailing, { prompt: "A red fox\n" })).images[0].verbatim, false);
+  });
+
+  it("keeps outer whitespace in the prompt sent to Codex and reports verbatim when Codex echoes it", async () => {
+    const s = await setup("ok");
+    const prompt = "  A red fox \n";
     const result = await gen(s, { prompt });
     assert.equal(result.images[0].verbatim, true);
     const [turn] = await sentTo(s, "turn/start");
@@ -289,7 +330,7 @@ describe("generateImages success", () => {
     const result = await gen(s, { prompt: "A red fox" });
     assert.equal(result.images.length, 1);
     assert.equal(result.images[0].revisedPrompt, "A red fox");
-    assert.equal(result.turnStatus, "completed");
+    assert.ok(!("turnStatus" in result));
   });
 
   it("declines server requests and still completes", async () => {
@@ -308,14 +349,93 @@ describe("generateImages success", () => {
     const s = await setup("savedpath", { FAKE_SAVED_PATH: saved });
     const result = await gen(s, { prompt: "A red fox" });
     const img = result.images[0];
-    assert.equal(img.codexPath, saved);
+    assert.ok(!("codexPath" in img));
     assert.deepEqual(img.size, { width: 5, height: 4 });
+    assert.equal(img.alpha, false);
     assert.deepEqual(await fs.readFile(img.path), makePng(5, 4));
     assert.notEqual(img.path, saved);
   });
 
   it("exposes the turn timeout constant", () => {
     assert.equal(TURN_TIMEOUT_MS, 15 * 60_000);
+  });
+});
+
+describe("generateImages alpha and transparent", () => {
+  it("echoes transparent true and detects an RGBA png", async () => {
+    const s = await setup("ok", { FAKE_PNG_COLOR_TYPE: "6" });
+    const result = await gen(s, { prompt: "x", transparent_background: true });
+    assert.equal(result.transparent, true);
+    assert.equal(result.images[0].alpha, true);
+    assert.deepEqual(await fs.readFile(result.images[0].path), makePng(3, 2, { colorType: 6 }));
+  });
+
+  it("detects a missing alpha channel on an RGB png", async () => {
+    const s = await setup("ok");
+    const result = await gen(s, { prompt: "x", transparent_background: true });
+    assert.equal(result.transparent, true);
+    assert.equal(result.images[0].alpha, false);
+  });
+
+  it("detects alpha from a tRNS chunk on an RGB png", async () => {
+    const s = await setup("ok", { FAKE_PNG_TRNS: "1" });
+    const result = await gen(s, { prompt: "x", transparent_background: true });
+    assert.equal(result.images[0].alpha, true);
+  });
+
+  it("reports alpha null for a jpeg and saves it with the jpg extension", async () => {
+    const s = await setup("ok", { FAKE_IMAGE_FORMAT: "jpeg" });
+    const result = await gen(s, { prompt: "x", transparent_background: true });
+    const img = result.images[0];
+    assert.equal(img.alpha, null);
+    assert.equal(img.mimeType, "image/jpeg");
+    assert.equal(path.extname(img.path), ".jpg");
+    assert.deepEqual(img.size, { width: 3, height: 2 });
+    assert.deepEqual(await fs.readFile(img.path), makeJpeg(3, 2));
+  });
+
+  it("reports transparent false by default", async () => {
+    const s = await setup("ok", { FAKE_PNG_COLOR_TYPE: "6" });
+    const result = await gen(s, { prompt: "x" });
+    assert.equal(result.transparent, false);
+    assert.equal(result.images[0].alpha, true);
+  });
+
+  it("reads alpha from the image taken from savedPath", async () => {
+    const dir = await makeTmp();
+    const saved = path.join(dir, "codex-made.png");
+    await fs.writeFile(saved, makePng(5, 4, { colorType: 4 }));
+    const s = await setup("savedpath", { FAKE_SAVED_PATH: saved });
+    const result = await gen(s, { prompt: "x", transparent_background: true });
+    assert.equal(result.images[0].alpha, true);
+  });
+});
+
+describe("generateImages duplicate notifications", () => {
+  it("ignores a repeated completed notification with the same item id", async () => {
+    const s = await setup("ok", { FAKE_DUPLICATE: "1" });
+    const events = [];
+    const result = await gen(s, { prompt: "A red fox" }, { onProgress: e => events.push(e) });
+    assert.equal(result.images.length, 1);
+    assert.deepEqual(result.failures, []);
+    assert.equal((await fs.readdir(path.join(s.base, "generated-images"))).length, 1);
+    assert.equal(events.filter(e => e.message === "Image 1 of 1 ready").length, 1);
+    assert.ok(!events.some(e => /Image 2 of/.test(e.message)));
+  });
+
+  it("dedupes per item id for count 2", async () => {
+    const s = await setup("count2", { FAKE_DUPLICATE: "1" });
+    const result = await gen(s, { prompt: "Two foxes", count: 2 });
+    assert.equal(result.images.length, 2);
+    assert.equal((await fs.readdir(path.join(s.base, "generated-images"))).length, 2);
+  });
+
+  it("records a repeated failed item once", async () => {
+    const s = await setup("fail_limit", { FAKE_DUPLICATE: "1" });
+    await assert.rejects(gen(s, { prompt: "x" }), err => {
+      assert.equal(err.message.match(/usage limit reached/g).length, 1);
+      return true;
+    });
   });
 });
 
@@ -541,15 +661,105 @@ describe("generateImages failures", () => {
     assert.equal(result.images.length, 1);
     assert.equal(result.failures.length, 1);
     assert.match(result.failures[0], /usage limit reached \(images\)/);
-    assert.equal(result.turnStatus, "completed");
+    assert.ok(!("turnStatus" in result));
     assert.deepEqual(await fs.readFile(result.images[0].path), makePng(3, 2));
   });
 
-  it("rejects when the image data cannot be decoded", async () => {
+  it("rejects with the failure lines when the image data cannot be decoded", async () => {
     const s = await setup("badimage");
-    await assert.rejects(gen(s, { prompt: "x" }), /could not be decoded/);
+    await assert.rejects(gen(s, { prompt: "x" }), err => {
+      assert.equal(err.message, "No image could be saved.\nImage 1: the image data could not be decoded.");
+      return true;
+    });
     const files = await fs.readdir(s.base);
     assert.ok(!files.includes("generated-images"));
+  });
+
+  it("reports an imageless completed item", async () => {
+    const s = await setup("imageless");
+    await assert.rejects(gen(s, { prompt: "x" }), err => {
+      assert.equal(err.message, "Codex finished without generating an image.\nCodex reported an image without any image data.");
+      return true;
+    });
+  });
+
+  it("returns the good image and lists an imageless one as a failure", async () => {
+    const s = await setup("imageless", { FAKE_COUNT: "2", FAKE_BAD_ONLY_FIRST: "1" });
+    const result = await gen(s, { prompt: "Two foxes", count: 2 });
+    assert.equal(result.requested, 2);
+    assert.equal(result.images.length, 1);
+    assert.deepEqual(result.failures, ["Codex reported an image without any image data."]);
+    assert.deepEqual(await fs.readFile(result.images[0].path), makePng(3, 2));
+  });
+
+  it("returns the good image and numbers the undecodable one in the failures", async () => {
+    const s = await setup("badimage", { FAKE_COUNT: "2", FAKE_BAD_ONLY_FIRST: "1" });
+    const result = await gen(s, { prompt: "Two foxes", count: 2 });
+    assert.equal(result.images.length, 1);
+    assert.deepEqual(result.failures, ["Image 1: the image data could not be decoded."]);
+    assert.match(path.basename(result.images[0].path), /_two-foxes_2\.png$/);
+  });
+
+  it("falls back to savedPath when the inline data is not an image", async () => {
+    const dir = await makeTmp();
+    const saved = path.join(dir, "codex-made.png");
+    await fs.writeFile(saved, makePng(5, 4, { colorType: 6 }));
+    const s = await setup("badimage_savedpath", { FAKE_SAVED_PATH: saved });
+    const result = await gen(s, { prompt: "x" });
+    assert.deepEqual(result.failures, []);
+    assert.deepEqual(result.images[0].size, { width: 5, height: 4 });
+    assert.equal(result.images[0].alpha, true);
+    assert.deepEqual(await fs.readFile(result.images[0].path), makePng(5, 4, { colorType: 6 }));
+  });
+
+  it("reports the decode failure when the inline data is not an image and savedPath is not either", async () => {
+    const dir = await makeTmp();
+    const saved = path.join(dir, "not-an-image.png");
+    await fs.writeFile(saved, "plain text");
+    const s = await setup("badimage_savedpath", { FAKE_SAVED_PATH: saved });
+    await assert.rejects(gen(s, { prompt: "x" }), err => {
+      assert.equal(err.message, "No image could be saved.\nImage 1: the image data could not be decoded.");
+      return true;
+    });
+  });
+
+  it("returns the second image when the first savedPath cannot be read", async () => {
+    const dir = await makeTmp();
+    const missing = path.join(dir, "gone.png");
+    const s = await setup("savedpath", { FAKE_COUNT: "2", FAKE_BAD_ONLY_FIRST: "1", FAKE_SAVED_PATH: missing });
+    const result = await gen(s, { prompt: "Two foxes", count: 2 });
+    assert.equal(result.requested, 2);
+    assert.equal(result.images.length, 1);
+    assert.equal(result.failures.length, 1);
+    assert.match(result.failures[0], /^Image 1 could not be saved: /);
+    assert.match(result.failures[0], /ENOENT/);
+    assert.match(path.basename(result.images[0].path), /_two-foxes_2\.png$/);
+    assert.deepEqual(await fs.readFile(result.images[0].path), makePng(3, 2));
+    assert.equal((await fs.readdir(path.join(s.base, "generated-images"))).length, 1);
+  });
+
+  it("throws No image could be saved with every failure line when nothing was saved", async () => {
+    const dir = await makeTmp();
+    const missing = path.join(dir, "gone.png");
+    const s = await setup("savedpath", { FAKE_COUNT: "2", FAKE_SAVED_PATH: missing });
+    await assert.rejects(gen(s, { prompt: "Two foxes", count: 2 }), err => {
+      const lines = err.message.split("\n");
+      assert.equal(lines[0], "No image could be saved.");
+      assert.equal(lines.length, 3);
+      assert.match(lines[1], /^Image 1 could not be saved: .*ENOENT/);
+      assert.match(lines[2], /^Image 2 could not be saved: .*ENOENT/);
+      return true;
+    });
+    await waitUnsubscribed(s);
+  });
+
+  it("reports a save error caused by an unwritable output directory", async () => {
+    const s = await setup("ok");
+    await fs.writeFile(path.join(s.base, "blocked"), "a file, not a directory");
+    await assert.rejects(gen(s, { prompt: "x", output_path: "blocked/sub" }), err => {
+      assert.match(err.message, /^No image could be saved\.\nImage 1 could not be saved: /);
+      return true;
+    });
   });
 
   it("rejects when the server dies on thread/start", async () => {
@@ -570,6 +780,67 @@ describe("generateImages cancellation and timeout", () => {
     controller.abort();
     await assert.rejects(gen(s, { prompt: "x" }, { signal: controller.signal }), /Cancelled/);
     assert.equal((await sentTo(s, "thread/start")).length, 0);
+  });
+
+  it("aborting right after Codex is ready rejects before turn/start is ever sent", async () => {
+    const s = await setup("hang");
+    const controller = new AbortController();
+    const before = { notification: s.client.listenerCount("notification"), close: s.client.listenerCount("close") };
+    const onProgress = ({ message }) => {
+      if (/Codex ready/.test(message)) controller.abort();
+    };
+    await assert.rejects(gen(s, { prompt: "x" }, { signal: controller.signal, onProgress }), err => {
+      assert.equal(err.message, "Cancelled before Codex started generating.");
+      return true;
+    });
+    await waitUnsubscribed(s);
+    assert.equal((await sentTo(s, "thread/start")).length, 1);
+    assert.equal((await sentTo(s, "turn/start")).length, 0);
+    assert.equal((await sentTo(s, "turn/interrupt")).length, 0);
+    assert.equal(s.client.listenerCount("notification"), before.notification);
+    assert.equal(s.client.listenerCount("close"), before.close);
+  });
+
+  it("aborting while the effort lookup is running never sends turn/start", async () => {
+    const controller = new AbortController();
+    const requests = [];
+    const client = new EventEmitter();
+    client.listModels = async () => {
+      controller.abort();
+      return [{ id: "m", model: "m", isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: "low" }] }];
+    };
+    client.request = async method => {
+      requests.push(method);
+      if (method === "thread/start") return { thread: { id: "t1" }, model: "m" };
+      return {};
+    };
+    await assert.rejects(
+      generateImages({ client, params: { prompt: "x" }, baseDir: await makeTmp(), signal: controller.signal }),
+      /^Error: Cancelled before Codex started generating\.$/
+    );
+    assert.deepEqual(requests, ["thread/start", "thread/unsubscribe"]);
+    assert.equal(client.listenerCount("notification"), 0);
+    assert.equal(client.listenerCount("close"), 0);
+  });
+
+  it("an abort that arrives before thread/start returns is also caught before turn/start", async () => {
+    const controller = new AbortController();
+    const requests = [];
+    const client = new EventEmitter();
+    client.listModels = async () => [];
+    client.request = async method => {
+      requests.push(method);
+      if (method === "thread/start") {
+        controller.abort();
+        return { thread: { id: "t1" }, model: "m" };
+      }
+      return {};
+    };
+    await assert.rejects(
+      generateImages({ client, params: { prompt: "x" }, baseDir: await makeTmp(), signal: controller.signal }),
+      /Cancelled before Codex started generating\./
+    );
+    assert.deepEqual(requests, ["thread/start", "thread/unsubscribe"]);
   });
 
   it("aborting mid-turn rejects with Cancelled and interrupts the turn", async () => {

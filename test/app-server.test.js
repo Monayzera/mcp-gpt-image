@@ -227,6 +227,101 @@ describe("AppServerClient crash handling", () => {
     assert.equal(child.exitCode, 0);
   });
 
+  it("close() ends stdin, then SIGTERM after 2s, then SIGKILL after another 2s while the child stays alive", t => {
+    const client = createClient("ok");
+    const calls = [];
+    const child = {
+      exitCode: null,
+      signalCode: null,
+      stdin: { end: () => calls.push("stdin.end") },
+      kill: signal => calls.push(signal ?? "SIGTERM"),
+    };
+    client.child = child;
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      client.close();
+      assert.deepEqual(calls, ["stdin.end"]);
+      t.mock.timers.tick(1999);
+      assert.deepEqual(calls, ["stdin.end"]);
+      t.mock.timers.tick(1);
+      assert.deepEqual(calls, ["stdin.end", "SIGTERM"]);
+      t.mock.timers.tick(1999);
+      assert.deepEqual(calls, ["stdin.end", "SIGTERM"]);
+      t.mock.timers.tick(1);
+      assert.deepEqual(calls, ["stdin.end", "SIGTERM", "SIGKILL"]);
+      t.mock.timers.tick(10_000);
+      assert.deepEqual(calls, ["stdin.end", "SIGTERM", "SIGKILL"]);
+    } finally {
+      t.mock.timers.reset();
+      child.exitCode = 0;
+    }
+  });
+
+  it("close() sends no signal when the child exits right after stdin ends", t => {
+    const client = createClient("ok");
+    const calls = [];
+    const child = {
+      exitCode: null,
+      signalCode: null,
+      stdin: {
+        end: () => {
+          calls.push("stdin.end");
+          child.exitCode = 0;
+        },
+      },
+      kill: signal => calls.push(signal ?? "SIGTERM"),
+    };
+    client.child = child;
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      client.close();
+      t.mock.timers.tick(10_000);
+      assert.deepEqual(calls, ["stdin.end"]);
+    } finally {
+      t.mock.timers.reset();
+    }
+  });
+
+  it("close() skips SIGKILL when the child dies after SIGTERM", t => {
+    const client = createClient("ok");
+    const calls = [];
+    const child = {
+      exitCode: null,
+      signalCode: null,
+      stdin: { end: () => calls.push("stdin.end") },
+      kill: signal => {
+        calls.push(signal ?? "SIGTERM");
+        child.signalCode = "SIGTERM";
+      },
+    };
+    client.child = child;
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      client.close();
+      t.mock.timers.tick(2000);
+      t.mock.timers.tick(10_000);
+      assert.deepEqual(calls, ["stdin.end", "SIGTERM"]);
+    } finally {
+      t.mock.timers.reset();
+      child.signalCode = null;
+      child.exitCode = 0;
+    }
+  });
+
+  it("close() does not touch a child that already exited", t => {
+    const client = createClient("ok");
+    const calls = [];
+    client.child = { exitCode: 0, signalCode: null, stdin: { end: () => calls.push("stdin.end") }, kill: () => calls.push("kill") };
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      client.close();
+      t.mock.timers.tick(10_000);
+      assert.deepEqual(calls, []);
+    } finally {
+      t.mock.timers.reset();
+    }
+  });
+
   it("close() on a client that never started is safe", () => {
     const client = createClient("ok");
     let closes = 0;
@@ -512,6 +607,59 @@ describe("AppServerClient rate limits", () => {
     assert.deepEqual(snaps.map(s => s.limitId), ["codex"]);
   });
 
+  it("readRateLimits discards its result when a rateLimits/updated notification arrived after the request was sent", async () => {
+    const { client } = await session("ok", { FAKE_RL_NOTIFY_BEFORE_REPLY: "1" });
+    await client.start();
+    const snaps = await client.readRateLimits();
+    assert.deepEqual(snaps.map(s => s.limitId), ["fresh"]);
+    assert.equal(snaps[0].primary.usedPercent, 77);
+    assert.deepEqual(client.rateLimitSnapshots(), snaps);
+    assert.ok(!client.rateLimitSnapshots().some(s => s.limitId === "codex"));
+  });
+
+  it("readRateLimits keeps merging later notifications into the discarded-read result", async () => {
+    const { client } = await session("ok", { FAKE_RL_NOTIFY_BEFORE_REPLY: "1" });
+    await client.start();
+    await client.readRateLimits();
+    await client.request("test/emit", {
+      notifications: [rateNotification({ limitId: "fresh", secondary: { usedPercent: 3, windowDurationMins: 10080 } })],
+    });
+    const [snap] = client.rateLimitSnapshots();
+    assert.equal(snap.primary.usedPercent, 77);
+    assert.equal(snap.secondary.usedPercent, 3);
+  });
+
+  it("readRateLimits applies its result when the only notification arrived before the request", async () => {
+    const { client } = await session("ok");
+    await client.start();
+    await client.request("test/emit", { notifications: [rateNotification({ limitId: "older", primary: { usedPercent: 1, windowDurationMins: 60 } })] });
+    await new Promise(resolve => setTimeout(resolve, 5));
+    const snaps = await client.readRateLimits();
+    assert.deepEqual(snaps.map(s => s.limitId), ["codex"]);
+  });
+
+  it("readRateLimits leaves the previous snapshots untouched when the request fails", async () => {
+    const { client } = await session("ok", { FAKE_RL_ERROR: "1" });
+    await client.start();
+    await client.request("test/emit", { notifications: [rateNotification({ limitId: "keep", primary: { usedPercent: 12, windowDurationMins: 300 } })] });
+    const updatedAt = client.rateLimitsUpdatedAt;
+    await assert.rejects(client.readRateLimits(), err => err instanceof CodexRpcError && /rate limits unavailable/.test(err.message));
+    assert.deepEqual(client.rateLimitSnapshots().map(s => s.limitId), ["keep"]);
+    assert.equal(client.rateLimitSnapshots()[0].primary.usedPercent, 12);
+    assert.equal(client.rateLimitsUpdatedAt, updatedAt);
+  });
+
+  it("readRateLimits builds a new map instead of mutating the old one", async () => {
+    const { client } = await session("ok");
+    await client.start();
+    await client.request("test/emit", { notifications: [rateNotification({ limitId: "old", primary: { usedPercent: 1, windowDurationMins: 60 } })] });
+    const before = client.rateLimits;
+    await client.readRateLimits();
+    assert.notEqual(client.rateLimits, before);
+    assert.deepEqual([...before.keys()], ["old"]);
+    assert.deepEqual([...client.rateLimits.keys()], ["codex"]);
+  });
+
   it("readRateLimits updates rateLimitsUpdatedAt", async () => {
     const { client } = await session("ok");
     await client.start();
@@ -551,6 +699,35 @@ describe("AppServerClient listModels", () => {
     assert.deepEqual(models.map(m => m.id), ["m-default", "m-page2", "m-page3"]);
     const requests = (await log()).filter(m => m.method === "model/list");
     assert.deepEqual(requests.map(r => r.params.cursor), [null, "2", "3"]);
+  });
+
+  it("stops when a page comes back empty even though a cursor is returned", async () => {
+    const { client, log } = await session("ok", { FAKE_PAGES: "5", FAKE_EMPTY_PAGE: "1" });
+    await client.start();
+    const models = await client.listModels();
+    assert.deepEqual(models, []);
+    const requests = (await log()).filter(m => m.method === "model/list");
+    assert.equal(requests.length, 1);
+  });
+
+  it("keeps the models gathered so far when a later page is empty", async () => {
+    const { client, log } = await session("ok", { FAKE_PAGES: "5", FAKE_EMPTY_PAGE: "3" });
+    await client.start();
+    const models = await client.listModels();
+    assert.deepEqual(models.map(m => m.id), ["m-default", "m-page2"]);
+    const requests = (await log()).filter(m => m.method === "model/list");
+    assert.deepEqual(requests.map(r => r.params.cursor), [null, "2", "3"]);
+  });
+
+  it("stops after 50 pages even if the server keeps returning a cursor", async () => {
+    const { client, log } = await session("ok", { FAKE_PAGES: "1000", FAKE_DELAY_MS: "1" });
+    await client.start();
+    const models = await client.listModels();
+    assert.equal(models.length, 50);
+    assert.equal(models.at(-1).id, "m-page50");
+    const requests = (await log()).filter(m => m.method === "model/list");
+    assert.equal(requests.length, 50);
+    assert.equal(requests.at(-1).params.cursor, "50");
   });
 
   it("does not cache a failure and retries on the next call", async () => {

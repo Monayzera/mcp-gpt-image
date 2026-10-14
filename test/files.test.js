@@ -3,16 +3,30 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { detectFormat, imageSize, planTargets, resolveReferenceImages, slugify, timestamp, writeUnique } from "../src/files.js";
-import { jpegSegment, makeGif, makeJpeg, makePng, makeWebp } from "./fixtures/images.js";
+import { detectFormat, expandHome, hasAlpha, imageSize, planTargets, resolveReferenceImages, slugify, timestamp, writeUnique } from "../src/files.js";
+import { jpegSegment, makeGif, makeJpeg, makePng, makeWebp, pngChunk } from "./fixtures/images.js";
 
 let tmp;
+const savedHome = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+
+function restoreHome() {
+  for (const [key, value] of Object.entries(savedHome)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+}
+
+function useFakeHome(dir) {
+  process.env.HOME = dir;
+  process.env.USERPROFILE = dir;
+}
 
 beforeEach(async () => {
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), "files-test-"));
 });
 
 afterEach(async () => {
+  restoreHome();
   await fs.rm(tmp, { recursive: true, force: true });
 });
 
@@ -112,6 +126,17 @@ describe("imageSize", () => {
     assert.equal(imageSize(corrupt), null);
   });
 
+  it("reads a jpeg whose frame header ends exactly at the end of the buffer", () => {
+    const minimal = Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.from([0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x05, 0x00, 0x04])]);
+    assert.equal(minimal.length, 11);
+    assert.deepEqual(imageSize(minimal), { width: 4, height: 5 });
+  });
+
+  it("returns null for a jpeg frame header cut one byte short", () => {
+    const cut = Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.from([0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x05, 0x00])]);
+    assert.equal(imageSize(cut), null);
+  });
+
   it("returns null for webp, which has no size parser", () => {
     assert.equal(imageSize(makeWebp()), null);
   });
@@ -119,6 +144,109 @@ describe("imageSize", () => {
   it("returns null for garbage and empty buffers", () => {
     assert.equal(imageSize(Buffer.from("garbage garbage garbage garbage")), null);
     assert.equal(imageSize(Buffer.alloc(0)), null);
+  });
+});
+
+describe("hasAlpha", () => {
+  it("is true for an RGBA png", () => {
+    assert.equal(hasAlpha(makePng(3, 2, { colorType: 6 })), true);
+  });
+
+  it("is true for a grayscale png with alpha", () => {
+    assert.equal(hasAlpha(makePng(3, 2, { colorType: 4 })), true);
+  });
+
+  it("is false for an RGB png", () => {
+    assert.equal(hasAlpha(makePng(3, 2)), false);
+    assert.equal(hasAlpha(makePng()), false);
+  });
+
+  it("is false for a grayscale png and for a palette png without tRNS", () => {
+    assert.equal(hasAlpha(makePng(3, 2, { colorType: 0 })), false);
+    assert.equal(hasAlpha(makePng(3, 2, { colorType: 3 })), false);
+  });
+
+  it("is true for an RGB png with a tRNS chunk before the image data", () => {
+    assert.equal(hasAlpha(makePng(3, 2, { colorType: 2, trns: true })), true);
+  });
+
+  it("is true for a palette or grayscale png with a tRNS chunk", () => {
+    assert.equal(hasAlpha(makePng(3, 2, { colorType: 3, trns: true })), true);
+    assert.equal(hasAlpha(makePng(3, 2, { colorType: 0, trns: true })), true);
+  });
+
+  it("is false when a tRNS chunk only appears after the image data", () => {
+    const png = makePng(3, 2);
+    const iend = png.subarray(png.length - 12);
+    const late = Buffer.concat([png.subarray(0, png.length - 12), pngChunk("tRNS", Buffer.alloc(6)), iend]);
+    assert.equal(hasAlpha(late), false);
+  });
+
+  it("finds tRNS after other ancillary chunks that precede the image data", () => {
+    const png = makePng(3, 2);
+    const idatStart = 8 + 12 + 13;
+    const withChunks = Buffer.concat([
+      png.subarray(0, idatStart),
+      pngChunk("gAMA", Buffer.alloc(4)),
+      pngChunk("tEXt", Buffer.from("Comment\0hello")),
+      pngChunk("tRNS", Buffer.alloc(6)),
+      png.subarray(idatStart),
+    ]);
+    assert.equal(hasAlpha(withChunks), true);
+  });
+
+  it("is false for a png cut off before the image data", () => {
+    assert.equal(hasAlpha(makePng().subarray(0, 40)), false);
+  });
+
+  it("is false for a png whose chunk length points past the buffer", () => {
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(0x7fffffff);
+    const broken = Buffer.concat([makePng().subarray(0, 8 + 12 + 13), length, Buffer.from("tEXt", "ascii")]);
+    assert.equal(hasAlpha(broken), false);
+  });
+
+  it("is null for a png too short to hold the color type", () => {
+    assert.equal(hasAlpha(makePng().subarray(0, 25)), null);
+  });
+
+  it("is null for jpeg, gif, webp, garbage and empty buffers", () => {
+    assert.equal(hasAlpha(makeJpeg()), null);
+    assert.equal(hasAlpha(makeGif()), null);
+    assert.equal(hasAlpha(makeWebp()), null);
+    assert.equal(hasAlpha(Buffer.from("not an image at all, just text")), null);
+    assert.equal(hasAlpha(Buffer.alloc(0)), null);
+  });
+});
+
+describe("expandHome", () => {
+  it("expands a lone tilde to the home directory", () => {
+    assert.equal(expandHome("~"), os.homedir());
+  });
+
+  it("expands ~/x with a forward slash", () => {
+    assert.equal(expandHome("~/x"), path.join(os.homedir(), "x"));
+    assert.equal(expandHome("~/a/b/c.png"), path.join(os.homedir(), "a", "b", "c.png"));
+  });
+
+  it("expands ~\\x with a backslash", () => {
+    assert.equal(expandHome("~\\x"), path.join(os.homedir(), "x"));
+  });
+
+  it("expands ~/ to the home directory", () => {
+    assert.equal(expandHome("~/"), os.homedir());
+  });
+
+  it("leaves other paths unchanged", () => {
+    for (const p of ["/abs/path", "rel/path", "./rel", "", "~user/x", "~x", "a/~/b", "C:\\Users\\x"]) {
+      assert.equal(expandHome(p), p, p);
+    }
+  });
+
+  it("follows the current home directory", () => {
+    useFakeHome(tmp);
+    assert.equal(expandHome("~/x"), path.join(tmp, "x"));
+    assert.equal(expandHome("~"), tmp);
   });
 });
 
@@ -253,6 +381,35 @@ describe("planTargets", () => {
     assert.equal(target.stem, `${stamp}_x`);
   });
 
+  it("expands ~/x.png in output_path to a file in the home directory", () => {
+    const [target] = planTargets({ outputPath: "~/x.png", baseDir: "/proj", prompt: "x", count: 1, date });
+    assert.deepEqual(target, { dir: os.homedir(), stem: "x" });
+  });
+
+  it("expands a ~ directory in output_path and keeps the timestamp stem", () => {
+    const [target] = planTargets({ outputPath: "~/imgs/sub", baseDir: "/proj", prompt: "A red fox", count: 1, date });
+    assert.deepEqual(target, { dir: path.join(os.homedir(), "imgs", "sub"), stem: `${stamp}_a-red-fox` });
+  });
+
+  it("expands a lone ~ in output_path as a directory", () => {
+    const [target] = planTargets({ outputPath: "~", baseDir: "/proj", prompt: "fox", count: 1, date });
+    assert.deepEqual(target, { dir: os.homedir(), stem: `${stamp}_fox` });
+  });
+
+  it("suffixes the stem of an expanded ~ file when count is greater than 1", () => {
+    const targets = planTargets({ outputPath: "~/x.png", baseDir: "/proj", prompt: "x", count: 2, date });
+    assert.deepEqual(targets, [
+      { dir: os.homedir(), stem: "x_1" },
+      { dir: os.homedir(), stem: "x_2" },
+    ]);
+  });
+
+  it("uses the current home directory for ~ in output_path", () => {
+    useFakeHome(tmp);
+    const [target] = planTargets({ outputPath: "~/out/pic.png", baseDir: "/proj", prompt: "x", count: 1, date });
+    assert.deepEqual(target, { dir: path.join(tmp, "out"), stem: "pic" });
+  });
+
   it("keeps the timestamp stem and suffixes it for an output_path directory with count 2", () => {
     const targets = planTargets({ outputPath: "imgs", baseDir: "/proj", prompt: "fox", count: 2, date });
     assert.deepEqual(targets.map(t => t.stem), [`${stamp}_fox_1`, `${stamp}_fox_2`]);
@@ -330,6 +487,27 @@ describe("resolveReferenceImages", () => {
     const c = await write("c.gif", makeGif());
     const d = await write("d.webp", makeWebp());
     assert.deepEqual(await resolveReferenceImages([d, "c.gif", b, a], tmp), [d, c, b, a]);
+  });
+
+  it("expands ~/ against the home directory", async () => {
+    const home = path.join(tmp, "home");
+    await fs.mkdir(home);
+    useFakeHome(home);
+    const file = path.join(home, "pics", "ref.png");
+    await fs.mkdir(path.dirname(file));
+    await fs.writeFile(file, makePng());
+    assert.deepEqual(await resolveReferenceImages(["~/pics/ref.png"], tmp), [file]);
+  });
+
+  it("names the expanded absolute path when a ~ reference is missing", async () => {
+    const home = path.join(tmp, "home");
+    await fs.mkdir(home);
+    useFakeHome(home);
+    await assert.rejects(resolveReferenceImages(["~/nope.png"], tmp), err => {
+      assert.match(err.message, /not found/);
+      assert.ok(err.message.includes(path.join(home, "nope.png")));
+      return true;
+    });
   });
 
   it("accepts images regardless of their file extension", async () => {

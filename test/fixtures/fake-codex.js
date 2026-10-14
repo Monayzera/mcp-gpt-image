@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import readline from "node:readline";
-import { makePng } from "./images.js";
+import { makeJpeg, makePng } from "./images.js";
 
 const scenario = process.env.FAKE_SCENARIO;
 if (!scenario) process.exit(0);
@@ -10,8 +10,17 @@ const rateLimitsByLimitId = process.env.FAKE_RL_BY_ID === "1";
 const modelPages = Number(process.env.FAKE_PAGES || 1);
 const failModelListOnce = process.env.FAKE_MODEL_FAIL_ONCE === "1";
 const stepDelayMs = Number(process.env.FAKE_DELAY_MS || 15);
+const emptyModelPage = Number(process.env.FAKE_EMPTY_PAGE || 0);
+const threadModelMissing = process.env.FAKE_THREAD_MODEL === "none";
+const rateLimitsError = process.env.FAKE_RL_ERROR === "1";
+const rateLimitsNotifyFirst = process.env.FAKE_RL_NOTIFY_BEFORE_REPLY === "1";
+const badOnlyFirst = process.env.FAKE_BAD_ONLY_FIRST === "1";
 
-const PNG_BASE64 = makePng(3, 2).toString("base64");
+const IMAGE_BASE64 = (
+  process.env.FAKE_IMAGE_FORMAT === "jpeg"
+    ? makeJpeg(3, 2)
+    : makePng(3, 2, { colorType: Number(process.env.FAKE_PNG_COLOR_TYPE || 2), trns: process.env.FAKE_PNG_TRNS === "1" })
+).toString("base64");
 
 const DEFAULT_MODEL = {
   id: "m-default",
@@ -105,16 +114,22 @@ function errorDetails() {
   return process.env.FAKE_ERROR_DETAILS ?? null;
 }
 
-function imageOverrides() {
+function imageOverrides(index) {
+  if (badOnlyFirst && index !== 1) return {};
   if (scenario === "savedpath") return { result: "", savedPath: process.env.FAKE_SAVED_PATH || null };
   if (scenario === "badimage") return { result: Buffer.from("this is not an image").toString("base64") };
+  if (scenario === "imageless") return { result: "", savedPath: null };
+  if (scenario === "badimage_savedpath") return { result: Buffer.from("this is not an image").toString("base64"), savedPath: process.env.FAKE_SAVED_PATH || null };
   return {};
 }
 
 async function runTurn(threadId, text) {
   const completeTurn = turn => notify("turn/completed", { threadId, turn: { id: "u1", status: "completed", error: null, items: [], ...turn } });
   const itemStarted = id => notify("item/started", { threadId, turnId: "u1", item: { type: "imageGeneration", id, status: "in_progress", result: "" } });
-  const itemCompleted = item => notify("item/completed", { threadId, turnId: "u1", item });
+  const itemCompleted = item => {
+    notify("item/completed", { threadId, turnId: "u1", item });
+    if (process.env.FAKE_DUPLICATE === "1") notify("item/completed", { threadId, turnId: "u1", item });
+  };
 
   await sleep(stepDelayMs);
 
@@ -168,7 +183,7 @@ async function runTurn(threadId, text) {
     notify("item/completed", {
       threadId: "other",
       turnId: "z1",
-      item: { type: "imageGeneration", id: "foreign", status: "completed", revisedPrompt: "foreign", result: PNG_BASE64, savedPath: null },
+      item: { type: "imageGeneration", id: "foreign", status: "completed", revisedPrompt: "foreign", result: IMAGE_BASE64, savedPath: null },
     });
     notify("turn/completed", { threadId: "other", turn: { id: "z1", status: "completed", error: null, items: [] } });
   }
@@ -187,7 +202,7 @@ async function runTurn(threadId, text) {
     }
   }
 
-  const total = scenario === "count2" || scenario === "partial" ? 2 : 1;
+  const total = Number(process.env.FAKE_COUNT || (scenario === "count2" || scenario === "partial" ? 2 : 1));
   for (let i = 1; i <= total; i++) {
     itemStarted(`img${i}`);
     if (i === 1) notify("account/rateLimits/updated", { rateLimits: snapshot() });
@@ -196,15 +211,16 @@ async function runTurn(threadId, text) {
       itemCompleted(failedItem(`img${i}`));
       continue;
     }
-    itemCompleted({
+    const item = {
       type: "imageGeneration",
       id: `img${i}`,
       status: "completed",
       revisedPrompt: revisedPromptFor(text),
-      result: PNG_BASE64,
+      result: IMAGE_BASE64,
       savedPath: null,
-      ...imageOverrides(),
-    });
+      ...imageOverrides(i),
+    };
+    itemCompleted(item);
   }
   completeTurn({});
 }
@@ -227,13 +243,20 @@ function handleRequest(message) {
         return;
       }
       const page = params?.cursor ? Number(params.cursor) : 1;
-      const data = page === 1 ? [DEFAULT_MODEL] : [{ ...DEFAULT_MODEL, id: `m-page${page}`, model: `m-page${page}`, isDefault: false }];
+      let data = page === 1 ? [DEFAULT_MODEL] : [{ ...DEFAULT_MODEL, id: `m-page${page}`, model: `m-page${page}`, isDefault: false }];
+      if (page === emptyModelPage) data = [];
       reply(id, { data, nextCursor: page < modelPages ? String(page + 1) : null });
       return;
     }
     case "thread/start":
       activeThreadId = "t1";
-      reply(id, { thread: { id: "t1" }, model: "m-default", cwd: params?.cwd ?? "/tmp", approvalPolicy: "never", reasoningEffort: null });
+      reply(id, {
+        thread: { id: "t1" },
+        ...(threadModelMissing ? {} : { model: "m-default" }),
+        cwd: params?.cwd ?? "/tmp",
+        approvalPolicy: "never",
+        reasoningEffort: null,
+      });
       return;
     case "turn/start":
       reply(id, { turn: { id: "u1", status: "inProgress" } });
@@ -247,6 +270,19 @@ function handleRequest(message) {
       reply(id, {});
       return;
     case "account/rateLimits/read":
+      if (rateLimitsError) {
+        replyError(id, -32000, "rate limits unavailable");
+        return;
+      }
+      if (rateLimitsNotifyFirst) {
+        sleep(stepDelayMs).then(() => {
+          notify("account/rateLimits/updated", {
+            rateLimits: { limitId: "fresh", primary: { usedPercent: 77, windowDurationMins: 300, resetsAt: nowSeconds() + 60 } },
+          });
+          reply(id, { rateLimits: snapshot() });
+        });
+        return;
+      }
       if (rateLimitsByLimitId) {
         const images = { limitId: "images", primary: { usedPercent: 40, windowDurationMins: 1440, resetsAt: nowSeconds() + 7200 } };
         reply(id, { rateLimits: snapshot(), rateLimitsByLimitId: { codex: snapshot(), images } });
