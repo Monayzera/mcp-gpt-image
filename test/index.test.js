@@ -56,10 +56,10 @@ describe("MCP server over stdio", { skip: process.platform === "win32" }, () => 
   it("lists generate_image and codex_status with their input schemas", async () => {
     await withServer("ok", {}, async ({ client }) => {
       const { tools } = await client.listTools();
-      assert.deepEqual(tools.map(t => t.name).sort(), ["codex_status", "generate_image"]);
+      assert.deepEqual(tools.map(t => t.name).sort(), ["codex_status", "generate_image", "get_image_result"]);
       const generate = tools.find(t => t.name === "generate_image");
       assert.deepEqual(generate.inputSchema.required, ["prompt"]);
-      for (const key of ["prompt", "count", "transparent_background", "reference_images", "prompt_mode", "model", "reasoning_effort", "output_path"]) {
+      for (const key of ["prompt", "count", "transparent_background", "reference_images", "prompt_mode", "model", "reasoning_effort", "output_path", "background"]) {
         assert.ok(key in generate.inputSchema.properties, key);
       }
       assert.equal(generate.inputSchema.properties.count.maximum, 4);
@@ -171,6 +171,85 @@ describe("MCP server over stdio", { skip: process.platform === "win32" }, () => 
       assert.match(textOf(outcome), /prompt must not be empty/);
       const sent = (await readLog(logFile)).filter(m => m.method === "turn/start");
       assert.equal(sent.length, 0);
+    });
+  });
+
+  it("generate_image with background returns a job id at once and get_image_result returns the images", async () => {
+    await withServer("ok", { FAKE_DELAY_MS: "300" }, async ({ client, project }) => {
+      const t0 = Date.now();
+      const started = await client.callTool({ name: "generate_image", arguments: { prompt: "A red fox", background: true } });
+      assert.notEqual(started.isError, true, textOf(started));
+      assert.ok(Date.now() - t0 < 1500, "background call should return quickly");
+      const id = /Started background job (\w+)\./.exec(textOf(started))?.[1];
+      assert.ok(id, textOf(started));
+      assert.equal(started.content.filter(c => c.type === "image").length, 0);
+
+      const pending = await client.callTool({ name: "get_image_result", arguments: { job_id: id } });
+      assert.match(textOf(pending), new RegExp(`Job ${id} is still running`));
+
+      const done = await client.callTool({ name: "get_image_result", arguments: { job_id: id, wait_seconds: 30 } });
+      assert.notEqual(done.isError, true, textOf(done));
+      assert.match(textOf(done), /^Generated 1 image with GPT Image via Codex/);
+      assert.equal(done.content.filter(c => c.type === "image").length, 1);
+      const files = await fs.readdir(path.join(project, "generated-images"));
+      assert.equal(files.length, 1);
+
+      const again = await client.callTool({ name: "get_image_result", arguments: { job_id: id } });
+      assert.match(textOf(again), /^Generated 1 image/);
+      assert.equal(again.content.filter(c => c.type === "image").length, 0);
+      assert.match(textOf(again), /were already returned once/);
+    });
+  });
+
+  it("generate_image refuses a fifth running background job", async () => {
+    await withServer("hang", {}, async ({ client }) => {
+      for (let i = 0; i < 4; i++) {
+        const ok = await client.callTool({ name: "generate_image", arguments: { prompt: `fox ${i}`, background: true } });
+        assert.notEqual(ok.isError, true, textOf(ok));
+      }
+      const fifth = await client.callTool({ name: "generate_image", arguments: { prompt: "fox 5", background: true } });
+      assert.equal(fifth.isError, true);
+      assert.match(textOf(fifth), /4 background jobs are already running/);
+    });
+  });
+
+  it("generate_image with background rejects a missing reference image before starting", async () => {
+    await withServer("ok", {}, async ({ client, logFile }) => {
+      const result = await client.callTool({ name: "generate_image", arguments: { prompt: "fox", background: true, reference_images: ["missing.png"] } });
+      assert.equal(result.isError, true);
+      assert.match(textOf(result), /Reference image not found/);
+      const log = await readLog(logFile);
+      assert.equal(log.filter(m => m.method === "turn/start").length, 0);
+    });
+  });
+
+  it("get_image_result reports an unknown job id as an error", async () => {
+    await withServer("ok", {}, async ({ client }) => {
+      const result = await client.callTool({ name: "get_image_result", arguments: { job_id: "nope" } });
+      assert.equal(result.isError, true);
+      assert.match(textOf(result), /Unknown job "nope"/);
+    });
+  });
+
+  it("get_image_result returns the error of a failed background job", async () => {
+    await withServer("turn_error", {}, async ({ client }) => {
+      const started = await client.callTool({ name: "generate_image", arguments: { prompt: "A red fox", background: true } });
+      const id = /Started background job (\w+)\./.exec(textOf(started))?.[1];
+      const result = await client.callTool({ name: "get_image_result", arguments: { job_id: id, wait_seconds: 30 } });
+      assert.equal(result.isError, true);
+      assert.match(textOf(result), /codex login/);
+    });
+  });
+
+  it("get_image_result stops waiting after wait_seconds while the job keeps running", async () => {
+    await withServer("hang", {}, async ({ client }) => {
+      const started = await client.callTool({ name: "generate_image", arguments: { prompt: "A red fox", background: true } });
+      const id = /Started background job (\w+)\./.exec(textOf(started))?.[1];
+      const t0 = Date.now();
+      const result = await client.callTool({ name: "get_image_result", arguments: { job_id: id, wait_seconds: 1 } });
+      const elapsed = Date.now() - t0;
+      assert.ok(elapsed >= 900 && elapsed < 5000, String(elapsed));
+      assert.match(textOf(result), /still running/);
     });
   });
 
