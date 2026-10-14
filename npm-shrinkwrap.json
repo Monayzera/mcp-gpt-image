@@ -17,7 +17,7 @@
         "mcp-gpt-image": "src/index.js"
       },
       "engines": {
-        "node": ">=18.17"
+        "node": ">=20"
       }
     },
     "node_modules/@hono/node-server": {

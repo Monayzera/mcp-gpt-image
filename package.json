@@ -8,14 +8,16 @@
   },
   "main": "src/index.js",
   "files": [
-    "src"
+    "src",
+    "skill",
+    "npm-shrinkwrap.json"
   ],
   "scripts": {
     "start": "node src/index.js",
     "test": "node --test"
   },
   "engines": {
-    "node": ">=18.17"
+    "node": ">=20"
   },
   "repository": {
     "type": "git",
