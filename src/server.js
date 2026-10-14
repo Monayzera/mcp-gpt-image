@@ -6,7 +6,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { closeAppServer, getAppServer } from "./app-server.js";
 import { formatRateLimits } from "./format.js";
-import { generateImages } from "./generate.js";
+import { envDefaults, generateImages, withEnvDefaults } from "./generate.js";
 import { CodexNotFoundError, findCodex, INSTALL_HINT } from "./locate.js";
 
 const pkg = createRequire(import.meta.url)("../package.json");
@@ -95,12 +95,12 @@ server.registerTool(
         .string()
         .min(1)
         .optional()
-        .describe("Codex chat model that relays the request and, in enhance mode, rewrites the prompt. It does not choose the image model. Default: the model in the user's Codex config. Call codex_status for the list."),
+        .describe("Codex chat model that relays the request and, in enhance mode, rewrites the prompt. It does not choose the image model. Default: GPT_IMAGE_MODEL if set, otherwise the model in the user's Codex config. Call codex_status for the list."),
       reasoning_effort: z
         .string()
         .min(1)
         .optional()
-        .describe("Reasoning effort for the Codex model, e.g. low, medium, high. Default: low in exact mode when the model supports it, otherwise the Codex config default. Call codex_status for the values each model supports."),
+        .describe("Reasoning effort for the Codex model, e.g. low, medium, high. Default: GPT_IMAGE_EFFORT if set; otherwise low in exact mode when the model supports it, else the Codex config default. Call codex_status for the values each model supports."),
       output_path: z
         .string()
         .min(1)
@@ -122,7 +122,7 @@ server.registerTool(
     try {
       client = await getAppServer(CLIENT_INFO);
       const baseDir = await projectDir();
-      const result = await generateImages({ client, params: args, baseDir, signal: extra?.signal, onProgress });
+      const result = await generateImages({ client, params: withEnvDefaults(args), baseDir, signal: extra?.signal, onProgress });
 
       const header = [
         result.images.length < result.requested
@@ -237,6 +237,10 @@ server.registerTool(
     }
 
     const baseDir = await projectDir();
+    const defaults = envDefaults();
+    if (defaults.model || defaults.effort) {
+      lines.push("", `MCP defaults: model ${defaults.model ?? "(Codex config)"}, reasoning effort ${defaults.effort ?? "(automatic)"} (GPT_IMAGE_MODEL / GPT_IMAGE_EFFORT)`);
+    }
     lines.push("", `Default save folder: ${path.join(baseDir, "generated-images")}`);
     return { content: [{ type: "text", text: lines.join("\n") }] };
   }

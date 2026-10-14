@@ -3,6 +3,21 @@ import os from "node:os";
 import { detectFormat, hasAlpha, imageSize, planTargets, resolveReferenceImages, writeUnique } from "./files.js";
 import { localDateTime } from "./format.js";
 
+export function envDefaults(env = process.env) {
+  const model = env.GPT_IMAGE_MODEL?.trim() || undefined;
+  const effort = env.GPT_IMAGE_EFFORT?.trim() || undefined;
+  return { model, effort };
+}
+
+export function withEnvDefaults(args, env = process.env) {
+  const defaults = envDefaults(env);
+  return {
+    ...args,
+    model: args.model ?? defaults.model,
+    reasoning_effort: args.reasoning_effort ?? defaults.effort,
+  };
+}
+
 export const TURN_TIMEOUT_MS = 15 * 60_000;
 const EXACT_DEFAULT_EFFORT = "low";
 

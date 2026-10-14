@@ -114,7 +114,13 @@ export async function removeSkill(env = process.env) {
 }
 
 function envArgs(env) {
-  return env.CODEX_PATH ? ["-e", `CODEX_PATH=${path.resolve(env.CODEX_PATH)}`] : [];
+  const args = [];
+  if (env.CODEX_PATH) args.push("-e", `CODEX_PATH=${path.resolve(env.CODEX_PATH)}`);
+  for (const key of ["GPT_IMAGE_MODEL", "GPT_IMAGE_EFFORT"]) {
+    const value = env[key]?.trim();
+    if (value) args.push("-e", `${key}=${value}`);
+  }
+  return args;
 }
 
 function manualAddCommand(env = process.env) {
