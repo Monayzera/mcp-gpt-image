@@ -30,12 +30,12 @@ npx -y github:Monayzera/mcp-gpt-image setup
 O comando faz três coisas:
 
 1. Copia a skill para `~/.claude/skills/gpt-image/SKILL.md` (ou `$CLAUDE_CONFIG_DIR/skills/...`).
-2. Registra o servidor MCP no Claude Code no escopo de usuário, como `npx -y github:Monayzera/mcp-gpt-image` (no Windows, dentro de `cmd /c`). Se já existir um servidor chamado `gpt-image`, ele não é alterado.
+2. Registra o servidor MCP no Claude Code no escopo de usuário, como `npx -y github:Monayzera/mcp-gpt-image` (no Windows, dentro de `cmd /c`). Se `CODEX_PATH` estiver definido, ele é repassado ao servidor. Um `gpt-image` já registrado no escopo de usuário não é alterado; se estiver em outro escopo, o setup avisa para você removê-lo.
 3. Confere se o Codex está instalado e logado.
 
 Depois, reinicie o Claude Code. O `claude mcp list` deve mostrar o `gpt-image` como conectado.
 
-Rodar o `setup` de novo sobrescreve a skill com a versão mais recente. O npx busca o commit mais novo a cada início, então o servidor se atualiza sozinho.
+Rodar o `setup` de novo substitui a skill pela versão mais recente, inclusive edições locais. O npx busca o commit mais novo a cada início, então o servidor se atualiza sozinho.
 
 Para registrar só o servidor MCP, sem a skill:
 
