@@ -4,7 +4,7 @@
 
 MCP server and skill that let Claude Code generate and edit images with GPT Image through your local Codex CLI. Uses your ChatGPT login. No OpenAI API key.
 
-Claude writes the prompt. Codex passes it to its built-in `image_gen` tool. The image is saved to disk and returned to Claude inline. The skill makes Claude review every image against a strict checklist and regenerate (up to 3 attempts) until it passes.
+Claude writes the prompt. Codex passes it to its built-in `image_gen` tool. The image is saved to disk and returned to Claude inline. The skill makes Claude ask a short round of questions first (at most 4, only what changes the image), then review every image against a strict checklist and regenerate (up to 3 attempts) until it passes.
 
 ## Requirements
 
@@ -29,7 +29,7 @@ npx -y github:Monayzera/mcp-gpt-image setup
 
 This does three things:
 
-1. Copies the skill to `~/.claude/skills/gpt-image/SKILL.md` (or `$CLAUDE_CONFIG_DIR/skills/...`).
+1. Copies the skill (`SKILL.md` and `styles.md`) to `~/.claude/skills/gpt-image/` (or `$CLAUDE_CONFIG_DIR/skills/gpt-image/`).
 2. Registers the MCP server in Claude Code at user scope, as `npx -y github:Monayzera/mcp-gpt-image` (on Windows, wrapped in `cmd /c`). If `CODEX_PATH` is set, it is passed to the server. An existing `gpt-image` entry at user scope is left unchanged; one in another scope is reported so you can remove it.
 3. Checks that Codex is installed and signed in.
 
@@ -53,11 +53,17 @@ Removes the skill and runs `claude mcp remove gpt-image --scope user`.
 
 ## Use
 
-Ask Claude for an image. The skill takes over: brief, prompt, generation, review, retries.
+Ask Claude for an image. The skill takes over: questions, prompt, generation, review, retries.
+
+Questions come in one round of at most 4, each with a recommended option first. Claude skips anything your request already answers, and skips the round entirely when the request is complete or you say "no questions" / "sem perguntas".
 
 > Make a 16:9 hero image for the landing page: a matte black coffee grinder on a concrete counter, soft window light.
 
 > Edit assets/logo.png: keep the shape, make the background transparent.
+
+To use a real logo, product or photo, paste or attach the image in the chat. Claude Code gives Claude its file path, and Claude passes it in `reference_images`.
+
+`styles.md` holds prompt recipes for photo and illustration styles (phone snapshot, editorial, film, product, documentary, cinematic, flat vector, 3D, watercolor, comic, logo, poster, and more). Each one is tagged with how it was verified: tested here, OpenAI documentation, or community sources.
 
 Size and aspect ratio are not parameters. They go in the prompt: "16:9" returned 1672x941 in testing.
 

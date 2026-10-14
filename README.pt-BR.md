@@ -4,7 +4,7 @@
 
 Servidor MCP e skill que deixam o Claude Code gerar e editar imagens com o GPT Image usando o Codex CLI instalado no seu computador. Usa o login do ChatGPT. Sem chave de API da OpenAI.
 
-O Claude escreve o prompt. O Codex o repassa à ferramenta `image_gen` dele. A imagem é salva em disco e volta para o Claude na própria resposta. A skill faz o Claude revisar cada imagem com um checklist rigoroso e gerar de novo (até 3 tentativas) até ela passar.
+O Claude escreve o prompt. O Codex o repassa à ferramenta `image_gen` dele. A imagem é salva em disco e volta para o Claude na própria resposta. A skill faz o Claude fazer antes uma rodada curta de perguntas (no máximo 4, só o que muda a imagem), revisar cada imagem com um checklist rigoroso e gerar de novo (até 3 tentativas) até ela passar.
 
 ## Requisitos
 
@@ -29,7 +29,7 @@ npx -y github:Monayzera/mcp-gpt-image setup
 
 O comando faz três coisas:
 
-1. Copia a skill para `~/.claude/skills/gpt-image/SKILL.md` (ou `$CLAUDE_CONFIG_DIR/skills/...`).
+1. Copia a skill (`SKILL.md` e `styles.md`) para `~/.claude/skills/gpt-image/` (ou `$CLAUDE_CONFIG_DIR/skills/gpt-image/`).
 2. Registra o servidor MCP no Claude Code no escopo de usuário, como `npx -y github:Monayzera/mcp-gpt-image` (no Windows, dentro de `cmd /c`). Se `CODEX_PATH` estiver definido, ele é repassado ao servidor. Um `gpt-image` já registrado no escopo de usuário não é alterado; se estiver em outro escopo, o setup avisa para você removê-lo.
 3. Confere se o Codex está instalado e logado.
 
@@ -53,11 +53,17 @@ Remove a skill e roda `claude mcp remove gpt-image --scope user`.
 
 ## Uso
 
-Peça a imagem ao Claude. A skill cuida do resto: briefing, prompt, geração, revisão e novas tentativas.
+Peça a imagem ao Claude. A skill cuida do resto: perguntas, prompt, geração, revisão e novas tentativas.
+
+As perguntas vêm numa única rodada de no máximo 4, cada uma com uma opção recomendada em primeiro lugar. O Claude pula o que o seu pedido já responde e pula a rodada inteira quando o pedido está completo ou quando você diz "sem perguntas".
 
 > Faça uma imagem 16:9 para o topo da landing page: um moedor de café preto fosco numa bancada de concreto, luz suave de janela.
 
 > Edite assets/logo.png: mantenha o formato e deixe o fundo transparente.
+
+Para usar um logo, produto ou foto real, cole ou anexe a imagem no chat. O Claude Code entrega ao Claude o caminho do arquivo, e o Claude o passa em `reference_images`.
+
+O `styles.md` traz receitas de prompt para estilos de foto e ilustração (foto de celular, editorial, filme, produto, documental, cinematográfico, vetor plano, 3D, aquarela, quadrinhos, logo, pôster e outros). Cada uma indica como foi verificada: testada aqui, documentação da OpenAI ou fontes da comunidade.
 
 Tamanho e proporção não são parâmetros. Eles vão no prompt: "16:9" gerou 1672x941 nos testes.
 
