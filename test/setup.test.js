@@ -19,6 +19,8 @@ import {
   SKILL_NAME,
   skillDir,
   skillSource,
+  skillSourceDir,
+  skillFiles,
   unregisterServer,
 } from "../src/setup.js";
 import { cleanup, makeTmp, waitFor } from "./support.js";
@@ -132,8 +134,12 @@ describe("installSkill and removeSkill", () => {
   it("copies SKILL.md into <config>/skills/gpt-image creating the missing folders and reports installed", async () => {
     const { config, env } = await configEnv();
     const result = await installSkill(env);
-    assert.deepEqual(result, { path: path.join(config, "skills", "gpt-image", "SKILL.md"), status: "installed" });
+    const names = await skillFiles();
+    assert.deepEqual(result, { path: path.join(config, "skills", "gpt-image", "SKILL.md"), files: names, status: "installed" });
     assert.deepEqual(await fs.readFile(result.path), await fs.readFile(SKILL_FILE));
+    for (const name of names) {
+      assert.deepEqual(await fs.readFile(path.join(config, "skills", "gpt-image", name)), await fs.readFile(path.join(skillSourceDir(), name)));
+    }
   });
 
   it("overwrites an older copy, reports replaced and keeps other files in the folder", async () => {
@@ -179,7 +185,7 @@ describe("installSkill and removeSkill", () => {
     const { path: dest } = await installSkill(env);
     await fs.writeFile(dest, "old");
     await installSkill(env);
-    assert.deepEqual(await fs.readdir(path.join(config, "skills", "gpt-image")), ["SKILL.md"]);
+    assert.deepEqual((await fs.readdir(path.join(config, "skills", "gpt-image"))).sort(), await skillFiles());
   });
 
   it("propagates a read error other than a missing file", async () => {

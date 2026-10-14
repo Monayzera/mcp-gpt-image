@@ -492,7 +492,7 @@ describe("setup and uninstall commands", { skip: process.platform === "win32" },
     const third = await runCli(["setup"], box.env);
     assert.ok(third.stdout.includes(`Skill:  ${box.skillFile} (replaced the existing copy)`), third.stdout);
     assert.deepEqual(await fs.readFile(box.skillFile), await fs.readFile(SKILL_SOURCE));
-    assert.deepEqual(await fs.readdir(path.dirname(box.skillFile)), ["SKILL.md"]);
+    assert.deepEqual((await fs.readdir(path.dirname(box.skillFile))).sort(), (await fs.readdir(path.dirname(SKILL_SOURCE))).sort());
   });
 
   it("setup registers the server through claude with CODEX_PATH and exits 0 when codex is signed in", async () => {

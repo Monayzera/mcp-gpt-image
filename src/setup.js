@@ -19,8 +19,26 @@ export function skillDir(env = process.env) {
   return path.join(claudeConfigDir(env), "skills", SKILL_NAME);
 }
 
+export function skillSourceDir() {
+  return fileURLToPath(new URL("../skill/", import.meta.url));
+}
+
 export function skillSource() {
-  return fileURLToPath(new URL("../skill/SKILL.md", import.meta.url));
+  return path.join(skillSourceDir(), "SKILL.md");
+}
+
+export async function skillFiles() {
+  const entries = await fs.readdir(skillSourceDir(), { withFileTypes: true });
+  return entries.filter(e => e.isFile()).map(e => e.name).sort();
+}
+
+async function readIfExists(file) {
+  try {
+    return await fs.readFile(file);
+  } catch (err) {
+    if (err.code === "ENOENT") return null;
+    throw err;
+  }
 }
 
 export function serverCommand(platform = process.platform) {
@@ -63,26 +81,33 @@ export function runCommand(command, args, { timeoutMs = COMMAND_TIMEOUT_MS, spaw
 export async function installSkill(env = process.env) {
   const dir = skillDir(env);
   await fs.mkdir(dir, { recursive: true });
-  const dest = path.join(dir, "SKILL.md");
-  const source = await fs.readFile(skillSource());
-  let previous = null;
-  try {
-    previous = await fs.readFile(dest);
-  } catch (err) {
-    if (err.code !== "ENOENT") throw err;
+  const names = await skillFiles();
+  const hadSkill = (await readIfExists(path.join(dir, "SKILL.md"))) !== null;
+  let changed = false;
+  for (const name of names) {
+    const source = await fs.readFile(path.join(skillSourceDir(), name));
+    const dest = path.join(dir, name);
+    const previous = await readIfExists(dest);
+    if (previous === null || !previous.equals(source)) changed = true;
+    await fs.writeFile(dest, source);
   }
-  await fs.writeFile(dest, source);
-  return { path: dest, status: previous === null ? "installed" : previous.equals(source) ? "unchanged" : "replaced" };
+  const status = !hadSkill ? "installed" : changed ? "replaced" : "unchanged";
+  return { path: path.join(dir, "SKILL.md"), files: names, status };
 }
 
 export async function removeSkill(env = process.env) {
   const dir = skillDir(env);
-  const file = path.join(dir, "SKILL.md");
   try {
-    await fs.unlink(file);
+    await fs.unlink(path.join(dir, "SKILL.md"));
   } catch (err) {
     if (err.code === "ENOENT") return false;
     throw err;
+  }
+  for (const name of await skillFiles()) {
+    if (name === "SKILL.md") continue;
+    await fs.unlink(path.join(dir, name)).catch(err => {
+      if (err.code !== "ENOENT") throw err;
+    });
   }
   await fs.rmdir(dir).catch(() => {});
   return true;
