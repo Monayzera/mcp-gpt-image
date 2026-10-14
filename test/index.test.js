@@ -23,14 +23,14 @@ function alive(pid) {
   }
 }
 
-async function withServer(scenario, extraEnv, fn, serverArgs = []) {
+async function withServer(scenario, extraEnv, fn) {
   const root = await makeTmp();
   const project = path.join(root, "project");
   await fs.mkdir(project);
   const logFile = path.join(root, "fake.log");
   const wrapper = await makeCodexWrapper(root);
   const env = fakeEnv({ ...process.env, CODEX_PATH: wrapper, CLAUDE_PROJECT_DIR: project }, scenario, { FAKE_LOG: logFile, ...extraEnv });
-  const transport = new StdioClientTransport({ command: process.execPath, args: [INDEX, ...serverArgs], env, stderr: "pipe" });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [INDEX], env, stderr: "pipe" });
   const stderr = [];
   transport.stderr?.on("data", chunk => stderr.push(String(chunk)));
   const client = new Client({ name: "e2e-test", version: "0.0.0" });
@@ -66,18 +66,6 @@ describe("MCP server over stdio", { skip: process.platform === "win32" }, () => 
       assert.equal(generate.annotations.readOnlyHint, false);
       assert.equal(tools.find(t => t.name === "codex_status").annotations.readOnlyHint, true);
     });
-  });
-
-  it("starts the MCP server for any first argument that is not setup or uninstall", async () => {
-    await withServer(
-      "ok",
-      {},
-      async ({ client }) => {
-        const { tools } = await client.listTools();
-        assert.deepEqual(tools.map(t => t.name).sort(), ["codex_status", "generate_image"]);
-      },
-      ["--stdio"]
-    );
   });
 
   it("codex_status reports path, version, sign-in, limits, config and models", async () => {
@@ -336,13 +324,29 @@ describe("MCP server over stdio", { skip: process.platform === "win32" }, () => 
   });
 });
 
+const USER_SCOPE = "User config (available in all your projects)";
+const LOCAL_SCOPE = "Local config (private to you in this project)";
+const PROJECT_SCOPE = "Project config (shared via .mcp.json)";
+
 const FAKE_CLAUDE_SCRIPT = [
   "#!/bin/sh",
   'echo "$*" >> "$FAKE_CLAUDE_LOG"',
-  'if [ "$1" = "mcp" ] && [ "$2" = "get" ]; then exit "${FAKE_CLAUDE_GET:-1}"; fi',
+  'if [ "$1" = "mcp" ] && [ "$2" = "get" ]; then',
+  '  if [ "${FAKE_CLAUDE_GET:-1}" = "0" ]; then',
+  '    echo "gpt-image:"',
+  '    if [ -n "$FAKE_CLAUDE_SCOPE" ]; then echo "  Scope: $FAKE_CLAUDE_SCOPE"; fi',
+  '    if [ -n "$FAKE_CLAUDE_STATUS" ]; then echo "  Status: $FAKE_CLAUDE_STATUS"; fi',
+  '    echo "  Type: stdio"',
+  "    exit 0",
+  "  fi",
+  '  echo "No MCP server found with name: gpt-image" >&2',
+  "  exit 1",
+  "fi",
   'exit "${FAKE_CLAUDE_ACTION:-0}"',
   "",
 ].join("\n");
+
+const REGISTERED = { FAKE_CLAUDE_GET: "0", FAKE_CLAUDE_SCOPE: USER_SCOPE, FAKE_CLAUDE_STATUS: "✔ Connected" };
 
 async function cliSandbox({ claude = false, codex = false, extraEnv = {} } = {}) {
   const root = await makeTmp("mcp-gpt-image-cli-");
@@ -374,9 +378,9 @@ async function cliSandbox({ claude = false, codex = false, extraEnv = {} } = {})
   return { root, config, bin, home, env, skillFile, codexPath, claudeCalls };
 }
 
-function runCli(args, env, timeoutMs = 30_000) {
+function runCli(args, env, { timeoutMs = 30_000, holdStdin = false } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawnProcess(process.execPath, [INDEX, ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawnProcess(process.execPath, [INDEX, ...args], { env, stdio: [holdStdin ? "pipe" : "ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => {
@@ -385,6 +389,7 @@ function runCli(args, env, timeoutMs = 30_000) {
     }, timeoutMs);
     child.stdout.on("data", chunk => (stdout += chunk));
     child.stderr.on("data", chunk => (stderr += chunk));
+    child.stdin?.on("error", () => {});
     child.on("error", err => {
       clearTimeout(timer);
       reject(err);
@@ -396,16 +401,80 @@ function runCli(args, env, timeoutMs = 30_000) {
   });
 }
 
+describe("index.js command dispatch", { skip: process.platform === "win32" }, () => {
+  for (const flag of ["help", "--help", "-h"]) {
+    it(`${flag} prints the usage to stdout and exits 0 without starting the server`, async () => {
+      const box = await cliSandbox();
+      const { code, stdout, stderr } = await runCli([flag], box.env, { timeoutMs: 10_000, holdStdin: true });
+      assert.equal(code, 0, `${stdout}\n${stderr}`);
+      assert.equal(stderr, "");
+      assert.ok(stdout.startsWith("Usage:\n"), stdout);
+      assert.match(stdout, /github:Monayzera\/mcp-gpt-image setup\s+install the skill and register the MCP server in Claude Code/);
+      assert.match(stdout, /github:Monayzera\/mcp-gpt-image uninstall\s+remove both/);
+      assert.match(stdout, /github:Monayzera\/mcp-gpt-image\s+run the MCP server \(stdio\)/);
+      await assert.rejects(fs.stat(box.config), { code: "ENOENT" });
+    });
+  }
+
+  for (const arg of ["bogus", "--stdio", "Setup", "SETUP", "start", "--version", "-v", "help me"]) {
+    it(`unknown argument "${arg}" prints Unknown command and the usage to stderr and exits 1 without starting the server`, async () => {
+      const box = await cliSandbox();
+      const { code, stdout, stderr } = await runCli([arg], box.env, { timeoutMs: 10_000, holdStdin: true });
+      assert.equal(code, 1, `${stdout}\n${stderr}`);
+      assert.equal(stdout, "");
+      assert.ok(stderr.startsWith(`Unknown command: ${arg}\n\nUsage:\n`), stderr);
+      assert.match(stderr, /setup\s+install the skill/);
+      assert.match(stderr, /uninstall\s+remove both/);
+      await assert.rejects(fs.stat(box.config), { code: "ENOENT" });
+    });
+  }
+
+  it("an empty string argument is an unknown command", async () => {
+    const box = await cliSandbox();
+    const { code, stdout, stderr } = await runCli([""], box.env, { timeoutMs: 10_000, holdStdin: true });
+    assert.equal(code, 1);
+    assert.equal(stdout, "");
+    assert.ok(stderr.startsWith("Unknown command: \n\nUsage:"), stderr);
+  });
+
+  it("only the first argument decides the command", async () => {
+    const box = await cliSandbox();
+    const help = await runCli(["help", "setup"], box.env, { timeoutMs: 10_000, holdStdin: true });
+    assert.equal(help.code, 0);
+    await assert.rejects(fs.stat(box.config), { code: "ENOENT" });
+    const unknown = await runCli(["bogus", "help"], box.env, { timeoutMs: 10_000, holdStdin: true });
+    assert.equal(unknown.code, 1);
+    assert.ok(unknown.stderr.startsWith("Unknown command: bogus\n"), unknown.stderr);
+  });
+
+  it("no argument starts the MCP server and keeps it running while stdin is open", async () => {
+    const box = await cliSandbox();
+    const child = spawnProcess(process.execPath, [INDEX], { env: box.env, stdio: ["pipe", "pipe", "pipe"] });
+    const exited = new Promise(resolve => child.once("close", code => resolve(code)));
+    try {
+      await new Promise(resolve => setTimeout(resolve, 600));
+      assert.equal(child.exitCode, null);
+      assert.equal(child.signalCode, null);
+    } finally {
+      child.stdin.end();
+    }
+    assert.equal(await exited, 0);
+  });
+});
+
 describe("setup and uninstall commands", { skip: process.platform === "win32" }, () => {
+  const manualAdd = codexPath =>
+    `claude mcp add --scope user gpt-image -e CODEX_PATH=${path.resolve(codexPath)} -- npx -y github:Monayzera/mcp-gpt-image`;
+
   it("setup writes the skill and exits 1 with guidance when claude and codex are not found", async () => {
     const box = await cliSandbox();
     assert.deepEqual(await fs.readdir(box.bin), []);
     const { code, stdout, stderr } = await runCli(["setup"], box.env);
     assert.equal(code, 1, `${stdout}\n${stderr}`);
     assert.deepEqual(await fs.readFile(box.skillFile), await fs.readFile(SKILL_SOURCE));
-    assert.ok(stdout.includes(`Skill:  ${box.skillFile}`), stdout);
+    assert.ok(stdout.includes(`Skill:  ${box.skillFile} (installed)`), stdout);
     assert.ok(stdout.includes("Claude Code CLI not found"), stdout);
-    assert.ok(stdout.includes("claude mcp add --scope user gpt-image -- npx -y github:Monayzera/mcp-gpt-image"), stdout);
+    assert.ok(stdout.includes(manualAdd(box.codexPath)), stdout);
     assert.ok(stdout.includes("Codex:  not found"), stdout);
     assert.ok(stdout.includes("npm install -g @openai/codex"), stdout);
     assert.ok(stdout.includes("Finish the steps above, then restart Claude Code."), stdout);
@@ -413,35 +482,84 @@ describe("setup and uninstall commands", { skip: process.platform === "win32" },
     await assert.rejects(fs.stat(path.join(box.home, ".claude")), { code: "ENOENT" });
   });
 
-  it("setup registers the server through claude and exits 0 when codex is signed in", async () => {
+  it("setup says already up to date on the second run and replaced when the copy differs", async () => {
+    const box = await cliSandbox();
+    const first = await runCli(["setup"], box.env);
+    assert.ok(first.stdout.includes(`Skill:  ${box.skillFile} (installed)`), first.stdout);
+    const second = await runCli(["setup"], box.env);
+    assert.ok(second.stdout.includes(`Skill:  ${box.skillFile} (already up to date)`), second.stdout);
+    await fs.writeFile(box.skillFile, "edited by the user");
+    const third = await runCli(["setup"], box.env);
+    assert.ok(third.stdout.includes(`Skill:  ${box.skillFile} (replaced the existing copy)`), third.stdout);
+    assert.deepEqual(await fs.readFile(box.skillFile), await fs.readFile(SKILL_SOURCE));
+    assert.deepEqual(await fs.readdir(path.dirname(box.skillFile)), ["SKILL.md"]);
+  });
+
+  it("setup registers the server through claude with CODEX_PATH and exits 0 when codex is signed in", async () => {
     const box = await cliSandbox({ claude: true, codex: true });
     const { code, stdout, stderr } = await runCli(["setup"], box.env);
     assert.equal(code, 0, `${stdout}\n${stderr}`);
-    assert.ok(stdout.includes(`Skill:  ${box.skillFile}`), stdout);
+    assert.ok(stdout.includes(`Skill:  ${box.skillFile} (installed)`), stdout);
     assert.ok(stdout.includes('MCP:    "gpt-image" added to Claude Code (user scope)'), stdout);
     assert.ok(stdout.includes(`Codex:  ${box.codexPath} (9.9.9, ChatGPT plus)`), stdout);
     assert.ok(stdout.includes("Done. Restart Claude Code to load the skill and the MCP server."), stdout);
     assert.deepEqual(await box.claudeCalls(), [
       "mcp get gpt-image",
-      "mcp add --scope user gpt-image -- npx -y github:Monayzera/mcp-gpt-image",
+      `mcp add --scope user gpt-image -e CODEX_PATH=${path.resolve(box.codexPath)} -- npx -y github:Monayzera/mcp-gpt-image`,
     ]);
     assert.deepEqual(await fs.readFile(box.skillFile), await fs.readFile(SKILL_SOURCE));
   });
 
-  it("setup leaves an existing registration unchanged", async () => {
-    const box = await cliSandbox({ claude: true, codex: true, extraEnv: { FAKE_CLAUDE_GET: "0" } });
+  it("setup leaves an existing user scope registration unchanged and shows its status", async () => {
+    const box = await cliSandbox({ claude: true, codex: true, extraEnv: REGISTERED });
     const { code, stdout, stderr } = await runCli(["setup"], box.env);
     assert.equal(code, 0, `${stdout}\n${stderr}`);
-    assert.ok(stdout.includes('MCP:    "gpt-image" already registered, left unchanged'), stdout);
+    assert.ok(stdout.includes('MCP:    "gpt-image" already registered at user scope, left unchanged (status: ✔ Connected)'), stdout);
+    assert.ok(stdout.includes("Done. Restart Claude Code"), stdout);
     assert.deepEqual(await box.claudeCalls(), ["mcp get gpt-image"]);
   });
 
-  it("setup exits 1 and prints the manual command when claude refuses to add the server", async () => {
+  it("setup omits the status suffix when claude prints no Status line", async () => {
+    const box = await cliSandbox({ claude: true, codex: true, extraEnv: { FAKE_CLAUDE_GET: "0", FAKE_CLAUDE_SCOPE: USER_SCOPE } });
+    const { code, stdout } = await runCli(["setup"], box.env);
+    assert.equal(code, 0);
+    assert.ok(stdout.includes('MCP:    "gpt-image" already registered at user scope, left unchanged\n'), stdout);
+    assert.ok(!stdout.includes("(status:"), stdout);
+  });
+
+  it("setup treats an existing registration without a Scope line as user scope", async () => {
+    const box = await cliSandbox({ claude: true, codex: true, extraEnv: { FAKE_CLAUDE_GET: "0", FAKE_CLAUDE_STATUS: "✗ Failed to connect" } });
+    const { code, stdout } = await runCli(["setup"], box.env);
+    assert.equal(code, 0);
+    assert.ok(stdout.includes('already registered at user scope, left unchanged (status: ✗ Failed to connect)'), stdout);
+    assert.deepEqual(await box.claudeCalls(), ["mcp get gpt-image"]);
+  });
+
+  for (const [label, scope] of [
+    ["local", LOCAL_SCOPE],
+    ["project", PROJECT_SCOPE],
+  ]) {
+    it(`setup exits 1 and explains the ${label} scope registration without touching it`, async () => {
+      const box = await cliSandbox({ claude: true, codex: true, extraEnv: { FAKE_CLAUDE_GET: "0", FAKE_CLAUDE_SCOPE: scope, FAKE_CLAUDE_STATUS: "✔ Connected" } });
+      const { code, stdout, stderr } = await runCli(["setup"], box.env);
+      assert.equal(code, 1, `${stdout}\n${stderr}`);
+      assert.ok(stdout.includes(`MCP:    "gpt-image" is registered in another scope (${scope}). It only works there.`), stdout);
+      assert.ok(stdout.includes("To make it available everywhere, remove that entry and run setup again."), stdout);
+      assert.ok(!stdout.includes("already registered at user scope"), stdout);
+      assert.ok(stdout.includes("Finish the steps above, then restart Claude Code."), stdout);
+      assert.ok(!stdout.includes("Done. Restart Claude Code"), stdout);
+      assert.ok(stdout.includes(`Codex:  ${box.codexPath} (9.9.9, ChatGPT plus)`), stdout);
+      assert.deepEqual(await box.claudeCalls(), ["mcp get gpt-image"]);
+      assert.deepEqual(await fs.readFile(box.skillFile), await fs.readFile(SKILL_SOURCE));
+    });
+  }
+
+  it("setup exits 1 and prints the manual command with CODEX_PATH when claude refuses to add the server", async () => {
     const box = await cliSandbox({ claude: true, codex: true, extraEnv: { FAKE_CLAUDE_ACTION: "1" } });
     const { code, stdout } = await runCli(["setup"], box.env);
     assert.equal(code, 1);
     assert.ok(stdout.includes("MCP:    registration failed:"), stdout);
-    assert.ok(stdout.includes("claude mcp add --scope user gpt-image -- npx -y github:Monayzera/mcp-gpt-image"), stdout);
+    assert.ok(stdout.includes(manualAdd(box.codexPath)), stdout);
     assert.ok(stdout.includes("Finish the steps above, then restart Claude Code."), stdout);
   });
 
@@ -461,8 +579,8 @@ describe("setup and uninstall commands", { skip: process.platform === "win32" },
     assert.match(stderr, /^mcp-gpt-image setup failed: /);
   });
 
-  it("uninstall removes the skill and the registration and exits 0", async () => {
-    const box = await cliSandbox({ claude: true, extraEnv: { FAKE_CLAUDE_GET: "0" } });
+  it("uninstall removes the skill and the user scope registration and exits 0", async () => {
+    const box = await cliSandbox({ claude: true, extraEnv: REGISTERED });
     await fs.mkdir(path.dirname(box.skillFile), { recursive: true });
     await fs.copyFile(SKILL_SOURCE, box.skillFile);
     const { code, stdout, stderr } = await runCli(["uninstall"], box.env);
@@ -472,6 +590,31 @@ describe("setup and uninstall commands", { skip: process.platform === "win32" },
     assert.deepEqual(await box.claudeCalls(), ["mcp get gpt-image", "mcp remove gpt-image --scope user"]);
     await assert.rejects(fs.stat(path.dirname(box.skillFile)), { code: "ENOENT" });
   });
+
+  it("uninstall removes a registration whose output has no Scope line", async () => {
+    const box = await cliSandbox({ claude: true, extraEnv: { FAKE_CLAUDE_GET: "0" } });
+    const { code, stdout } = await runCli(["uninstall"], box.env);
+    assert.equal(code, 0);
+    assert.ok(stdout.includes('MCP:    "gpt-image" removed from Claude Code'), stdout);
+    assert.deepEqual(await box.claudeCalls(), ["mcp get gpt-image", "mcp remove gpt-image --scope user"]);
+  });
+
+  for (const [label, scope] of [
+    ["local", LOCAL_SCOPE],
+    ["project", PROJECT_SCOPE],
+  ]) {
+    it(`uninstall exits 1 without calling remove for a ${label} scope registration`, async () => {
+      const box = await cliSandbox({ claude: true, extraEnv: { FAKE_CLAUDE_GET: "0", FAKE_CLAUDE_SCOPE: scope, FAKE_CLAUDE_STATUS: "✔ Connected" } });
+      await fs.mkdir(path.dirname(box.skillFile), { recursive: true });
+      await fs.copyFile(SKILL_SOURCE, box.skillFile);
+      const { code, stdout, stderr } = await runCli(["uninstall"], box.env);
+      assert.equal(code, 1, `${stdout}\n${stderr}`);
+      assert.ok(stdout.includes(`MCP:    "gpt-image" is registered in another scope (${scope}), not removed. Remove it with: claude mcp remove gpt-image`), stdout);
+      assert.ok(stdout.includes(`Skill:  removed from ${path.dirname(box.skillFile)}`), stdout);
+      assert.deepEqual(await box.claudeCalls(), ["mcp get gpt-image"]);
+      await assert.rejects(fs.stat(box.skillFile), { code: "ENOENT" });
+    });
+  }
 
   it("uninstall exits 0 when nothing is installed or registered", async () => {
     const box = await cliSandbox({ claude: true });
@@ -493,7 +636,7 @@ describe("setup and uninstall commands", { skip: process.platform === "win32" },
   });
 
   it("uninstall exits 1 when claude fails to remove the server", async () => {
-    const box = await cliSandbox({ claude: true, extraEnv: { FAKE_CLAUDE_GET: "0", FAKE_CLAUDE_ACTION: "1" } });
+    const box = await cliSandbox({ claude: true, extraEnv: { ...REGISTERED, FAKE_CLAUDE_ACTION: "1" } });
     const { code, stdout } = await runCli(["uninstall"], box.env);
     assert.equal(code, 1);
     assert.ok(stdout.includes("MCP:    removal failed:"), stdout);
