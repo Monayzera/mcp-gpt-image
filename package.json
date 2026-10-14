@@ -1,0 +1,37 @@
+{
+  "name": "mcp-gpt-image",
+  "version": "1.0.0",
+  "description": "MCP server that lets Claude Code generate and edit images with GPT Image through the Codex CLI.",
+  "type": "module",
+  "bin": {
+    "mcp-gpt-image": "src/index.js"
+  },
+  "main": "src/index.js",
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Monayzera/mcp-gpt-image.git"
+  },
+  "keywords": [
+    "mcp",
+    "claude-code",
+    "codex",
+    "gpt-image",
+    "image-generation"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "cross-spawn": "^7.0.6",
+    "zod": "^3.25.76"
+  }
+}
