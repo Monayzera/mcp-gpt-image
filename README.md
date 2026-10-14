@@ -89,7 +89,7 @@ The result lists each saved path with its size, the prompt that reached GPT Imag
 
 Returns the result of a `background: true` job: the same text and images as a normal call, or its status while it runs. `wait_seconds` (0-600) waits at most that long and returns as soon as the job finishes. Images are returned on the first successful collection only. At most 4 jobs run at once; finished jobs are kept for 1 hour and are lost if the server restarts.
 
-Claude Code can also move any long MCP call to the background by itself. To make that happen after 10 seconds instead of 2 minutes, add `"CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS": "10000"` to the `env` block of `~/.claude/settings.json`.
+Claude Code can also move any long MCP call to the background by itself. To make that happen after 10 seconds instead of 2 minutes, add `"CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS": "10000"` to the `env` block of `~/.claude/settings.json`. In the Claude desktop app (Code tab) also add `"CLAUDE_AUTO_BACKGROUND_TASKS": "1"`; without it the call was not moved to the background in testing.
 
 ### codex_status
 

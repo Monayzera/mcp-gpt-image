@@ -89,7 +89,7 @@ O resultado lista cada caminho salvo com o tamanho, o prompt que chegou ao GPT I
 
 Devolve o resultado de um job iniciado com `background: true`: o mesmo texto e as mesmas imagens de uma chamada normal, ou o status enquanto ele roda. `wait_seconds` (0-600) espera no máximo esse tempo e retorna assim que o job termina. As imagens voltam só na primeira coleta. No máximo 4 jobs rodam ao mesmo tempo; jobs terminados ficam guardados por 1 hora e se perdem se o servidor reiniciar.
 
-O Claude Code também pode mandar sozinho qualquer chamada MCP longa para segundo plano. Para isso acontecer depois de 10 segundos em vez de 2 minutos, adicione `"CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS": "10000"` ao bloco `env` do `~/.claude/settings.json`.
+O Claude Code também pode mandar sozinho qualquer chamada MCP longa para segundo plano. Para isso acontecer depois de 10 segundos em vez de 2 minutos, adicione `"CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS": "10000"` ao bloco `env` do `~/.claude/settings.json`. No app desktop do Claude (aba Code), adicione também `"CLAUDE_AUTO_BACKGROUND_TASKS": "1"`; sem ela a chamada não foi para segundo plano nos testes.
 
 ### codex_status
 
