@@ -86,7 +86,7 @@ server.registerTool(
         .array(z.string().min(1))
         .max(16)
         .optional()
-        .describe("Local image files (PNG, JPEG, WebP or GIF, up to 16) to edit or to use as references. Absolute, relative to the project directory, or starting with ~."),
+        .describe("Local image files (PNG, JPEG, WebP or GIF, up to 16) to edit, to use as references, or to place in the result (for example a real logo). Absolute, relative to the project directory, or starting with ~. Images the user pasted or attached in the chat come with a file path (\"[Image: source: <path>]\"): pass that path."),
       prompt_mode: z
         .enum(["exact", "enhance"])
         .default("exact")
