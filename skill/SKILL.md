@@ -3,6 +3,7 @@ name: gpt-image
 description: Generate or edit raster images (photos, illustrations, icons, logos, banners, mockups, textures, transparent cutouts) with GPT Image through the gpt-image MCP server. Asks a short round of useful questions first, then reviews every result like a demanding art director and regenerates until it is right. Use whenever the user asks to create, generate, draw, or edit a raster image, picture, photo, icon, logo, banner, illustration, mockup, or texture. Not for charts, diagrams, SVG, code, HTML layouts, or video.
 allowed-tools:
   - mcp__gpt-image__generate_image
+  - mcp__gpt-image__get_image_result
   - mcp__gpt-image__codex_status
 ---
 
@@ -12,7 +13,10 @@ You are the art director. GPT Image is the illustrator. Find out what the user a
 
 Tools:
 - `mcp__gpt-image__generate_image`: generate or edit. About 30-90 s per image.
+- `mcp__gpt-image__get_image_result`: collect a job started with `background: true`.
 - `mcp__gpt-image__codex_status`: setup, usage limits, models.
+
+Background: when there is other work to do while an image renders, call `generate_image` with `background: true`. It returns a job id at once; keep working, then call `get_image_result` with that id (`wait_seconds` up to 600 waits at most that long and returns as soon as the job finishes) and review the images as usual. Images come back only on the first successful collection. At most 4 jobs run at once; finished jobs are kept for 1 hour.
 
 If these tools are missing, tell the user to run `npx -y github:Monayzera/mcp-gpt-image setup` and restart Claude Code. Stop there.
 
@@ -88,7 +92,9 @@ Specific cases:
 
 `count`: keep 1. Use more only when the user asks for options.
 
-`prompt_mode: "enhance"`: only when the user explicitly wants Codex to elaborate a vague idea. Then pass a model listed by `codex_status`, and `reasoning_effort: "high"` only if that model lists it. Check that the rewritten prompt shown in the result still matches the brief; if not, regenerate in exact mode.
+`model` and `reasoning_effort` are optional. Leave them out by default: the MCP then uses the Codex config model with effort `low`. You may pass a stronger model and higher effort when you judge it worth it, mainly in `enhance` mode, where the model writes the final prompt. In `exact` mode the model only relays your text, so a stronger model does not change the image. TESTED: `gpt-6-astra` with `max` used about 4-6% of the 5h window per image, against about 1% with the default, with no better image. Valid values come from `codex_status`.
+
+`prompt_mode: "enhance"`: only when the user explicitly wants Codex to elaborate a vague idea. This is where a stronger `model` and a higher `reasoning_effort` can help (optional, see above). Check that the rewritten prompt shown in the result still matches the brief; if not, regenerate in exact mode.
 
 ## 3. Attached images and logos
 
