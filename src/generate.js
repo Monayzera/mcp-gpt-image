@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import os from "node:os";
-import { detectFormat, imageSize, planTargets, resolveReferenceImages, writeUnique } from "./files.js";
+import { detectFormat, hasAlpha, imageSize, planTargets, resolveReferenceImages, writeUnique } from "./files.js";
 import { localDateTime } from "./format.js";
 
 export const TURN_TIMEOUT_MS = 15 * 60_000;
@@ -48,7 +48,7 @@ export function buildInstructions({ mode, count, transparent, hasReferences }) {
 }
 
 function normalizePrompt(text) {
-  return String(text ?? "").replace(/\r\n?/g, "\n").trim();
+  return String(text ?? "").replace(/\r\n?/g, "\n");
 }
 
 function modelEfforts(model) {
@@ -75,7 +75,8 @@ async function safeListModels(client) {
 
 export async function validateModel(client, model) {
   if (!model) return;
-  const models = await client.listModels();
+  const models = await safeListModels(client);
+  if (!models?.length) return;
   if (!findModel(models, model)) {
     throw new Error(`Unknown Codex model "${model}". Available models and reasoning efforts:\n${describeModels(models)}`);
   }
@@ -115,6 +116,7 @@ function describeFailure(item) {
     const reset = failure.resetsAt ? ` It resets at ${localDateTime(failure.resetsAt)}.` : "";
     return `Image generation usage limit reached (${failure.limitId}).${reset}`;
   }
+  if (item?.status === "completed") return "Codex reported an image without any image data.";
   return `Image generation ended with status "${item?.status ?? "unknown"}".`;
 }
 
@@ -152,6 +154,7 @@ export async function generateImages({ client, params, baseDir, signal, onProgre
   const threadModel = thread?.model ?? params.model ?? null;
 
   const images = [];
+  const seenItems = new Set();
   const failures = [];
   let agentText = "";
   let lastError = null;
@@ -160,9 +163,6 @@ export async function generateImages({ client, params, baseDir, signal, onProgre
   let cleanup = () => {};
 
   try {
-    const effort = await chooseEffort(client, threadModel, params.reasoning_effort, mode);
-    progress(0.05, `Codex ready (${threadModel ?? "default model"}${effort ? `, effort ${effort}` : ""})`);
-
     const finished = new Promise((resolve, reject) => {
       const onNotification = msg => {
         const p = msg?.params;
@@ -171,11 +171,13 @@ export async function generateImages({ client, params, baseDir, signal, onProgre
           startedCount += 1;
           progress(images.length + 0.1, `Generating image ${startedCount} of ${count}`);
         } else if (msg.method === "item/completed" && p.item?.type === "imageGeneration") {
+          if (p.item.id && seenItems.has(p.item.id)) return;
+          if (p.item.id) seenItems.add(p.item.id);
           if (p.item.status === "completed" && (p.item.result || p.item.savedPath)) {
             images.push(p.item);
             progress(images.length, `Image ${images.length} of ${count} ready`);
           } else {
-            failures.push(p.item);
+            failures.push(describeFailure(p.item));
           }
         } else if (msg.method === "item/completed" && p.item?.type === "agentMessage" && p.item.text) {
           agentText = p.item.text;
@@ -210,13 +212,17 @@ export async function generateImages({ client, params, baseDir, signal, onProgre
     });
     finished.catch(() => {});
 
+    const effort = await chooseEffort(client, threadModel, params.reasoning_effort, mode);
+    progress(0.05, `Codex ready (${threadModel ?? "default model"}${effort ? `, effort ${effort}` : ""})`);
+
     const input = [{ type: "text", text: prompt, text_elements: [] }, ...references.map(p => ({ type: "localImage", path: p }))];
     const turnParams = { threadId, input };
     if (effort) turnParams.effort = effort;
+    if (signal?.aborted) throw new Error("Cancelled before Codex started generating.");
     const started = await client.request("turn/start", turnParams, { timeoutMs: 60_000 });
     turnId = started?.turn?.id ?? null;
     if (signal?.aborted) {
-      client.request("turn/interrupt", { threadId, turnId }, { timeoutMs: 10_000 }).catch(() => {});
+      if (turnId) client.request("turn/interrupt", { threadId, turnId }, { timeoutMs: 10_000 }).catch(() => {});
       throw new Error("Cancelled. The Codex turn was interrupted.");
     }
 
@@ -225,7 +231,7 @@ export async function generateImages({ client, params, baseDir, signal, onProgre
     if (!images.length) {
       const reasons = [
         describeTurnError(turn?.error) ?? describeTurnError(lastError),
-        ...failures.map(describeFailure),
+        ...failures,
         agentText && agentText.trim() !== "DONE" ? `Codex said: ${agentText.trim()}` : null,
       ].filter(Boolean);
       throw new Error(`Codex finished without generating an image.${reasons.length ? `\n${reasons.join("\n")}` : ""}`);
@@ -234,38 +240,42 @@ export async function generateImages({ client, params, baseDir, signal, onProgre
     const targets = planTargets({ outputPath: params.output_path, baseDir, prompt, count: images.length, date: startedAt });
     const saved = [];
     for (const [i, item] of images.entries()) {
-      let buffer = item.result ? Buffer.from(item.result, "base64") : null;
-      if ((!buffer || !detectFormat(buffer)) && item.savedPath) {
-        buffer = await fs.readFile(item.savedPath);
+      try {
+        let buffer = item.result ? Buffer.from(item.result, "base64") : null;
+        if ((!buffer || !detectFormat(buffer)) && item.savedPath) {
+          buffer = await fs.readFile(item.savedPath);
+        }
+        const format = buffer ? detectFormat(buffer) : null;
+        if (!format) {
+          failures.push(`Image ${i + 1}: the image data could not be decoded.`);
+          continue;
+        }
+        const file = await writeUnique(targets[i].dir, targets[i].stem, format.ext, buffer);
+        const revisedPrompt = item.revisedPrompt ?? null;
+        saved.push({
+          path: file,
+          mimeType: format.mime,
+          data: buffer.toString("base64"),
+          bytes: buffer.length,
+          size: imageSize(buffer),
+          alpha: hasAlpha(buffer),
+          revisedPrompt,
+          verbatim: revisedPrompt === null ? null : normalizePrompt(revisedPrompt) === normalizePrompt(prompt),
+        });
+      } catch (err) {
+        failures.push(`Image ${i + 1} could not be saved: ${err?.message ?? err}`);
       }
-      const format = buffer ? detectFormat(buffer) : null;
-      if (!format) {
-        failures.push({ status: "unreadable image data" });
-        continue;
-      }
-      const file = await writeUnique(targets[i].dir, targets[i].stem, format.ext, buffer);
-      const revisedPrompt = item.revisedPrompt ?? null;
-      saved.push({
-        path: file,
-        mimeType: format.mime,
-        data: buffer.toString("base64"),
-        bytes: buffer.length,
-        size: imageSize(buffer),
-        revisedPrompt,
-        verbatim: revisedPrompt === null ? null : normalizePrompt(revisedPrompt) === normalizePrompt(prompt),
-        codexPath: item.savedPath ?? null,
-      });
     }
-    if (!saved.length) throw new Error("Codex returned image data that could not be decoded.");
+    if (!saved.length) throw new Error(`No image could be saved.\n${failures.join("\n")}`);
 
     return {
       images: saved,
       requested: count,
-      failures: failures.map(describeFailure),
+      failures,
       model: threadModel,
       effort,
       mode,
-      turnStatus: turn?.status ?? null,
+      transparent,
       durationMs: Date.now() - startedAt.getTime(),
     };
   } finally {

@@ -1,5 +1,26 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
+
+export function expandHome(p) {
+  if (p === "~") return os.homedir();
+  if (/^~[\\/]/.test(p)) return path.join(os.homedir(), p.slice(2));
+  return p;
+}
+
+export function hasAlpha(buffer) {
+  const format = detectFormat(buffer);
+  if (format?.mime !== "image/png" || buffer.length < 26) return null;
+  const colorType = buffer[25];
+  if (colorType === 4 || colorType === 6) return true;
+  for (let i = 8; i + 8 <= buffer.length; ) {
+    const type = buffer.toString("ascii", i + 4, i + 8);
+    if (type === "tRNS") return true;
+    if (type === "IDAT" || type === "IEND") return false;
+    i += 12 + buffer.readUInt32BE(i);
+  }
+  return false;
+}
 
 const FORMATS = [
   { mime: "image/png", ext: ".png", test: b => b.length > 8 && b.readUInt32BE(0) === 0x89504e47 && b.readUInt32BE(4) === 0x0d0a1a0a },
@@ -66,7 +87,7 @@ export function planTargets({ outputPath, baseDir, prompt, count, date = new Dat
   let dir = defaultDir;
   let stem = `${timestamp(date)}_${slugify(prompt)}`;
   if (outputPath) {
-    const resolved = path.resolve(baseDir, outputPath);
+    const resolved = path.resolve(baseDir, expandHome(outputPath));
     const ext = path.extname(resolved).toLowerCase();
     if (IMAGE_EXTS.has(ext)) {
       dir = path.dirname(resolved);
@@ -95,7 +116,7 @@ export async function writeUnique(dir, stem, ext, buffer) {
 export async function resolveReferenceImages(paths, baseDir) {
   const resolved = [];
   for (const p of paths ?? []) {
-    const abs = path.resolve(baseDir, p);
+    const abs = path.resolve(baseDir, expandHome(p));
     let stat;
     try {
       stat = await fs.stat(abs);

@@ -167,12 +167,18 @@ export class AppServerClient extends EventEmitter {
   }
 
   async readRateLimits({ timeoutMs = 15_000 } = {}) {
+    const requestedAt = Date.now();
     const res = await this.request("account/rateLimits/read", {}, { timeoutMs });
     const buckets = res?.rateLimitsByLimitId && Object.keys(res.rateLimitsByLimitId).length
       ? Object.values(res.rateLimitsByLimitId)
       : [res?.rateLimits];
-    this.rateLimits.clear();
-    for (const bucket of buckets) this.#storeRateLimits(bucket);
+    if (this.rateLimitsUpdatedAt > requestedAt) return this.rateLimitSnapshots();
+    const fresh = new Map();
+    for (const bucket of buckets) {
+      if (bucket && typeof bucket === "object") fresh.set(bucket.limitId ?? "codex", mergeSnapshot(null, bucket));
+    }
+    this.rateLimits = fresh;
+    this.rateLimitsUpdatedAt = Date.now();
     return this.rateLimitSnapshots();
   }
 
@@ -185,16 +191,24 @@ export class AppServerClient extends EventEmitter {
       this.modelsPromise = (async () => {
         const models = [];
         let cursor = null;
-        do {
+        for (let page = 0; page < 50; page++) {
           const res = await this.request("model/list", { cursor, includeHidden: false }, { timeoutMs: 30_000 });
-          models.push(...(Array.isArray(res?.data) ? res.data : []));
+          const data = Array.isArray(res?.data) ? res.data : [];
+          models.push(...data);
           cursor = res?.nextCursor ?? null;
-        } while (cursor && models.length < 1000);
+          if (!cursor || !data.length) break;
+        }
         return models;
       })();
-      this.modelsPromise.catch(() => {
-        this.modelsPromise = null;
-      });
+      const pending = this.modelsPromise;
+      pending.then(
+        models => {
+          if (!models.length && this.modelsPromise === pending) this.modelsPromise = null;
+        },
+        () => {
+          if (this.modelsPromise === pending) this.modelsPromise = null;
+        }
+      );
     }
     return this.modelsPromise;
   }
@@ -254,10 +268,17 @@ export class AppServerClient extends EventEmitter {
     try {
       child.stdin.end();
     } catch {}
+    const alive = () => child.exitCode === null && child.signalCode === null;
     const timer = setTimeout(() => {
       try {
-        if (child.exitCode === null && child.signalCode === null) child.kill();
+        if (alive()) child.kill();
       } catch {}
+      const hardTimer = setTimeout(() => {
+        try {
+          if (alive()) child.kill("SIGKILL");
+        } catch {}
+      }, CLOSE_GRACE_MS);
+      hardTimer.unref?.();
     }, CLOSE_GRACE_MS);
     timer.unref?.();
   }
