@@ -123,7 +123,9 @@ server.registerTool(
       const result = await generateImages({ client, params: args, baseDir, signal: extra?.signal, onProgress });
 
       const header = [
-        `Generated ${result.images.length} of ${result.requested} image(s) with GPT Image via Codex`,
+        result.images.length < result.requested
+          ? `Generated ${result.images.length} of ${result.requested} requested images with GPT Image via Codex`
+          : `Generated ${result.images.length} image${result.images.length > 1 ? "s" : ""} with GPT Image via Codex`,
         `(model ${result.model ?? "default"}${result.effort ? `, effort ${result.effort}` : ""}, prompt_mode ${result.mode}) in ${Math.round(result.durationMs / 1000)}s.`,
       ].join(" ");
       const lines = [header, ""];

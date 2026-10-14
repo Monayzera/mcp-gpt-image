@@ -25,7 +25,7 @@ export function imageSize(buffer) {
     }
     if (format?.mime === "image/jpeg") {
       let i = 2;
-      while (i + 9 < buffer.length) {
+      while (i + 9 <= buffer.length) {
         if (buffer[i] !== 0xff) return null;
         const marker = buffer[i + 1];
         const len = buffer.readUInt16BE(i + 2);

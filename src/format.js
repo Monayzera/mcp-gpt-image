@@ -36,7 +36,11 @@ export function formatWindow(win, now = Date.now()) {
   const used = Math.max(0, Math.min(100, win.usedPercent));
   let text = `${windowLabel(win.windowDurationMins)}: ${100 - used}% left (${used}% used)`;
   if (win.resetsAt) {
-    text += `, resets in ${relativeDuration(win.resetsAt * 1000 - now)} at ${localDateTime(win.resetsAt)}`;
+    const remaining = win.resetsAt * 1000 - now;
+    text +=
+      remaining > 0
+        ? `, resets in ${relativeDuration(remaining)} at ${localDateTime(win.resetsAt)}`
+        : `, reset was due at ${localDateTime(win.resetsAt)}`;
   }
   return text;
 }

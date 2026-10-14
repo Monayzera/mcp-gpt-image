@@ -63,6 +63,7 @@ export class AppServerClient extends EventEmitter {
   }
 
   async #start() {
+    if (this.closed) throw new Error("Codex app-server was closed.");
     let child;
     try {
       child = this.spawnImpl(this.codexPath, this.args, {
@@ -146,14 +147,16 @@ export class AppServerClient extends EventEmitter {
   }
 
   #answerServerRequest(msg) {
+    if (this.closed) return;
     const reply = SERVER_REQUEST_REPLIES[msg.method];
-    if (reply) this.#write({ jsonrpc: "2.0", id: msg.id, result: reply });
-    else
-      this.#write({
-        jsonrpc: "2.0",
-        id: msg.id,
-        error: { code: -32601, message: `mcp-gpt-image does not handle "${msg.method}"` },
-      });
+    const response = reply
+      ? { jsonrpc: "2.0", id: msg.id, result: reply }
+      : { jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: `mcp-gpt-image does not handle "${msg.method}"` } };
+    try {
+      this.#write(response);
+    } catch (err) {
+      this.#keepStderr(`could not answer ${msg.method}: ${err?.message ?? err}`);
+    }
   }
 
   #storeRateLimits(snapshot) {
