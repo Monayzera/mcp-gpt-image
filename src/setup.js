@@ -64,8 +64,15 @@ export async function installSkill(env = process.env) {
   const dir = skillDir(env);
   await fs.mkdir(dir, { recursive: true });
   const dest = path.join(dir, "SKILL.md");
-  await fs.copyFile(skillSource(), dest);
-  return dest;
+  const source = await fs.readFile(skillSource());
+  let previous = null;
+  try {
+    previous = await fs.readFile(dest);
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
+  await fs.writeFile(dest, source);
+  return { path: dest, status: previous === null ? "installed" : previous.equals(source) ? "unchanged" : "replaced" };
 }
 
 export async function removeSkill(env = process.env) {
@@ -81,26 +88,45 @@ export async function removeSkill(env = process.env) {
   return true;
 }
 
-function manualAddCommand() {
-  return `claude mcp add --scope user ${SERVER_NAME} -- ${serverCommand().join(" ")}`;
+function envArgs(env) {
+  return env.CODEX_PATH ? ["-e", `CODEX_PATH=${path.resolve(env.CODEX_PATH)}`] : [];
 }
 
-export async function registerServer(run = runCommand) {
+function manualAddCommand(env = process.env) {
+  return ["claude", "mcp", "add", "--scope", "user", SERVER_NAME, ...envArgs(env), "--", ...serverCommand()].join(" ");
+}
+
+export function parseExisting(stdout) {
+  const scope = /^[ \t]*Scope:[ \t]*(.+)$/im.exec(stdout ?? "")?.[1]?.trim() ?? null;
+  const health = /^[ \t]*Status:[ \t]*(.+)$/im.exec(stdout ?? "")?.[1]?.trim() ?? null;
+  return { scope, health, userScope: scope ? /^user\b/i.test(scope) : true };
+}
+
+function failureDetail(result) {
+  return (result.error?.message ?? (result.stderr || result.stdout) ?? "").trim();
+}
+
+export async function registerServer(run = runCommand, env = process.env) {
   const existing = await run("claude", ["mcp", "get", SERVER_NAME]);
   if (existing.error?.code === "ENOENT") return { status: "no-claude" };
-  if (existing.code === 0) return { status: "exists" };
-  const added = await run("claude", ["mcp", "add", "--scope", "user", SERVER_NAME, "--", ...serverCommand()]);
+  if (existing.code === 0) {
+    const info = parseExisting(existing.stdout);
+    return { ...info, status: info.userScope ? "exists" : "other-scope" };
+  }
+  const added = await run("claude", ["mcp", "add", "--scope", "user", SERVER_NAME, ...envArgs(env), "--", ...serverCommand()]);
   if (added.code === 0) return { status: "added" };
-  return { status: "failed", detail: (added.error?.message ?? (added.stderr || added.stdout)).trim() };
+  return { status: "failed", detail: failureDetail(added) };
 }
 
 export async function unregisterServer(run = runCommand) {
   const existing = await run("claude", ["mcp", "get", SERVER_NAME]);
   if (existing.error?.code === "ENOENT") return { status: "no-claude" };
   if (existing.code !== 0) return { status: "absent" };
+  const info = parseExisting(existing.stdout);
+  if (!info.userScope) return { ...info, status: "other-scope" };
   const removed = await run("claude", ["mcp", "remove", SERVER_NAME, "--scope", "user"]);
   if (removed.code === 0) return { status: "removed" };
-  return { status: "failed", detail: (removed.error?.message ?? (removed.stderr || removed.stdout)).trim() };
+  return { status: "failed", detail: failureDetail(removed) };
 }
 
 async function checkCodex(print) {
@@ -132,13 +158,18 @@ async function checkCodex(print) {
 }
 
 export async function setup(print = console.log) {
-  const skillFile = await installSkill();
-  print(`Skill:  ${skillFile}`);
+  const skill = await installSkill();
+  const skillNote = { installed: "installed", unchanged: "already up to date", replaced: "replaced the existing copy" }[skill.status];
+  print(`Skill:  ${skill.path} (${skillNote})`);
 
   const reg = await registerServer();
   if (reg.status === "added") print(`MCP:    "${SERVER_NAME}" added to Claude Code (user scope)`);
-  else if (reg.status === "exists") print(`MCP:    "${SERVER_NAME}" already registered, left unchanged`);
-  else if (reg.status === "no-claude") print(`MCP:    Claude Code CLI not found. Register it manually:\n        ${manualAddCommand()}`);
+  else if (reg.status === "exists") {
+    print(`MCP:    "${SERVER_NAME}" already registered at user scope, left unchanged${reg.health ? ` (status: ${reg.health})` : ""}`);
+  } else if (reg.status === "other-scope") {
+    print(`MCP:    "${SERVER_NAME}" is registered in another scope (${reg.scope}). It only works there.`);
+    print(`        To make it available everywhere, remove that entry and run setup again.`);
+  } else if (reg.status === "no-claude") print(`MCP:    Claude Code CLI not found. Register it manually:\n        ${manualAddCommand()}`);
   else print(`MCP:    registration failed: ${reg.detail}\n        Register it manually:\n        ${manualAddCommand()}`);
 
   const codexReady = await checkCodex(print);
@@ -154,7 +185,8 @@ export async function uninstall(print = console.log) {
   const reg = await unregisterServer();
   if (reg.status === "removed") print(`MCP:    "${SERVER_NAME}" removed from Claude Code`);
   else if (reg.status === "absent") print(`MCP:    "${SERVER_NAME}" not registered`);
+  else if (reg.status === "other-scope") print(`MCP:    "${SERVER_NAME}" is registered in another scope (${reg.scope}), not removed. Remove it with: claude mcp remove ${SERVER_NAME}`);
   else if (reg.status === "no-claude") print(`MCP:    Claude Code CLI not found. Remove it manually: claude mcp remove ${SERVER_NAME} --scope user`);
   else print(`MCP:    removal failed: ${reg.detail}`);
-  return reg.status === "failed" ? 1 : 0;
+  return reg.status === "failed" || reg.status === "other-scope" ? 1 : 0;
 }
