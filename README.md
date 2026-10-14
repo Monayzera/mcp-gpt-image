@@ -81,8 +81,15 @@ Size and aspect ratio are not parameters. They go in the prompt: "16:9" returned
 | `model` | Codex config | Codex chat model that relays the request. It does not choose the image model. |
 | `reasoning_effort` | `low` in exact mode, if the model supports it | Reasoning effort for that model. |
 | `output_path` | `<project>/generated-images/` | A directory, or a file path. The name is kept; the extension follows the returned format (PNG). |
+| `background` | `false` | Return a job id at once and keep generating; collect it with `get_image_result`. |
 
 The result lists each saved path with its size, the prompt that reached GPT Image (when Codex reports it), the alpha check when transparency was requested, and the usage limits Codex reports (5-hour and weekly windows).
+
+### get_image_result
+
+Returns the result of a `background: true` job: the same text and images as a normal call, or its status while it runs. `wait_seconds` (0-600) waits at most that long and returns as soon as the job finishes. Images are returned on the first successful collection only. At most 4 jobs run at once; finished jobs are kept for 1 hour and are lost if the server restarts.
+
+Claude Code can also move any long MCP call to the background by itself. To make that happen after 10 seconds instead of 2 minutes, add `"CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS": "10000"` to the `env` block of `~/.claude/settings.json`.
 
 ### codex_status
 
