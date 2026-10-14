@@ -431,6 +431,24 @@ describe("registerServer", () => {
     assert.ok(args.indexOf("gpt-image") < args.indexOf("-e"));
   });
 
+  it("passes GPT_IMAGE_MODEL and GPT_IMAGE_EFFORT after CODEX_PATH and before the separator", async () => {
+    const { run, calls } = stubRun([{ code: 1 }, { code: 0 }]);
+    await registerServer(run, { CODEX_PATH: CODEX, GPT_IMAGE_MODEL: "gpt-6-astra", GPT_IMAGE_EFFORT: "max" });
+    assert.deepEqual(calls[1], [
+      "claude", "mcp", "add", "--scope", "user", "gpt-image",
+      "-e", `CODEX_PATH=${CODEX}`,
+      "-e", "GPT_IMAGE_MODEL=gpt-6-astra",
+      "-e", "GPT_IMAGE_EFFORT=max",
+      "--", ...serverCommand(),
+    ]);
+  });
+
+  it("trims GPT_IMAGE_* values and skips blank ones", async () => {
+    const { run, calls } = stubRun([{ code: 1 }, { code: 0 }]);
+    await registerServer(run, { GPT_IMAGE_MODEL: "  gpt-6-astra  ", GPT_IMAGE_EFFORT: "   " });
+    assert.deepEqual(calls[1], ["claude", "mcp", "add", "--scope", "user", "gpt-image", "-e", "GPT_IMAGE_MODEL=gpt-6-astra", "--", ...serverCommand()]);
+  });
+
   it("resolves a relative CODEX_PATH to an absolute path", async () => {
     const { run, calls } = stubRun([{ code: 1 }, { code: 0 }]);
     await registerServer(run, { CODEX_PATH: path.join("relative", "dir", "codex") });

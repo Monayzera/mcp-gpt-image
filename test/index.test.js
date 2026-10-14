@@ -174,6 +174,33 @@ describe("MCP server over stdio", { skip: process.platform === "win32" }, () => 
     });
   });
 
+  it("generate_image uses GPT_IMAGE_MODEL and GPT_IMAGE_EFFORT when the call omits them", async () => {
+    await withServer("ok", { GPT_IMAGE_MODEL: "m-default", GPT_IMAGE_EFFORT: "high" }, async ({ client, logFile }) => {
+      const result = await client.callTool({ name: "generate_image", arguments: { prompt: "A red fox" } });
+      assert.notEqual(result.isError, true, textOf(result));
+      const log = await readLog(logFile);
+      assert.equal(log.find(m => m.method === "thread/start").params.model, "m-default");
+      assert.equal(log.find(m => m.method === "turn/start").params.effort, "high");
+      assert.match(textOf(result), /model m-default, effort high/);
+    });
+  });
+
+  it("generate_image call arguments override GPT_IMAGE_EFFORT", async () => {
+    await withServer("ok", { GPT_IMAGE_MODEL: "m-default", GPT_IMAGE_EFFORT: "high" }, async ({ client, logFile }) => {
+      const result = await client.callTool({ name: "generate_image", arguments: { prompt: "A red fox", reasoning_effort: "low" } });
+      assert.notEqual(result.isError, true, textOf(result));
+      const log = await readLog(logFile);
+      assert.equal(log.find(m => m.method === "turn/start").params.effort, "low");
+    });
+  });
+
+  it("codex_status shows the GPT_IMAGE_* defaults", async () => {
+    await withServer("ok", { GPT_IMAGE_MODEL: "m-default", GPT_IMAGE_EFFORT: "high" }, async ({ client }) => {
+      const result = await client.callTool({ name: "codex_status", arguments: {} });
+      assert.match(textOf(result), /MCP defaults: model m-default, reasoning effort high \(GPT_IMAGE_MODEL \/ GPT_IMAGE_EFFORT\)/);
+    });
+  });
+
   it("generate_image sends the prompt to Codex without trimming it", async () => {
     await withServer("ok", {}, async ({ client, logFile }) => {
       const prompt = "  A red fox \n";

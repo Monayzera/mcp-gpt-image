@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
-import { buildInstructions, chooseEffort, generateImages, TURN_TIMEOUT_MS, validateModel } from "../src/generate.js";
+import { buildInstructions, chooseEffort, envDefaults, generateImages, TURN_TIMEOUT_MS, validateModel, withEnvDefaults } from "../src/generate.js";
 import { makeGif, makeJpeg, makePng } from "./fixtures/images.js";
 import { cleanup, makeTmp, session, waitFor } from "./support.js";
 
@@ -932,5 +932,26 @@ describe("generateImages progress", () => {
     const s = await setup("ok");
     const result = await gen(s, { prompt: "x" });
     assert.equal(result.images.length, 1);
+  });
+});
+
+describe("envDefaults and withEnvDefaults", () => {
+  it("reads and trims GPT_IMAGE_MODEL and GPT_IMAGE_EFFORT", () => {
+    assert.deepEqual(envDefaults({ GPT_IMAGE_MODEL: " gpt-6-astra ", GPT_IMAGE_EFFORT: "max" }), { model: "gpt-6-astra", effort: "max" });
+  });
+
+  it("returns undefined for missing or blank values", () => {
+    assert.deepEqual(envDefaults({}), { model: undefined, effort: undefined });
+    assert.deepEqual(envDefaults({ GPT_IMAGE_MODEL: "  ", GPT_IMAGE_EFFORT: "" }), { model: undefined, effort: undefined });
+  });
+
+  it("uses env values only when the call does not set them", () => {
+    const env = { GPT_IMAGE_MODEL: "gpt-6-astra", GPT_IMAGE_EFFORT: "max" };
+    assert.deepEqual(withEnvDefaults({ prompt: "p" }, env), { prompt: "p", model: "gpt-6-astra", reasoning_effort: "max" });
+    assert.deepEqual(withEnvDefaults({ prompt: "p", model: "m-default", reasoning_effort: "low" }, env), { prompt: "p", model: "m-default", reasoning_effort: "low" });
+  });
+
+  it("leaves model and effort undefined without env values", () => {
+    assert.deepEqual(withEnvDefaults({ prompt: "p" }, {}), { prompt: "p", model: undefined, reasoning_effort: undefined });
   });
 });
