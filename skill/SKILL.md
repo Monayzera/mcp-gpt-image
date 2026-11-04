@@ -5,6 +5,7 @@ allowed-tools:
   - mcp__gpt-image__generate_image
   - mcp__gpt-image__get_image_result
   - mcp__gpt-image__codex_status
+  - Read
 ---
 
 # GPT Image
@@ -69,6 +70,10 @@ Use `prompt_mode: "exact"` (default). Codex is told to pass your text to GPT Ima
 
 Open [styles.md](styles.md) and follow the recipe of the chosen style.
 
+Before writing, two passes:
+- Concept: privately sketch three takes in one line each. Drop any take a stock-photo site or a generic AI image would show first (glowing brains for "AI", latte-art hearts for "coffee", golden hour for everything). Keep the most specific one that still serves the use and name it in the assumptions line. The concept only fills what the user left open (angle, light, moment, composition); the subject and every element the user named stay exactly as asked.
+- Detail inventory: open [details.md](details.md) for the subject's domain and list the 6 to 12 details a real one would show. A phone app mockup, for example, needs the exact device, its buttons, the Dynamic Island, a status bar with time and battery, and real screen content. If no section fits, build the list from what a real example of that object has. Put in the prompt only the details visible at the final size.
+
 Structure, in this order:
 1. Format line: aspect ratio + medium or style + use. Example: `Vertical 9:16 phone wallpaper, real photo taken with an ordinary smartphone.` There is no size or quality parameter; the aspect ratio in the prompt sets the output shape (TESTED: 16:9 gave 1672x941, 9:16 gave 941x1672).
 2. Scene and background.
@@ -79,7 +84,7 @@ Structure, in this order:
 
 Rules that keep it from looking AI-made (tags as in styles.md):
 - Describe a concrete capture, not quality claims. Skip "8K", "masterpiece", "ultra detailed", "award-winning", "trending". COMMUNITY.
-- Camera specs are cues for the look, not exact optics. OFFICIAL [O1]. Lens and aperture wording ("35mm f/2.8") pushed a polished pro-photo look; a phone-snapshot description looked more real to the user. TESTED once.
+- Camera specs are cues for the look, not exact optics. OFFICIAL [O1]. Lens and aperture wording ("35mm f/2.8") pushed a polished pro-photo look; a phone-snapshot description looked more real to the user. ANECDOTAL (n=1).
 - Prefer light that exists in the scene (overcast, streetlight, window). Golden hour and dramatic skies read as AI. ANECDOTAL [C3, C4].
 - Add imperfections that fit the subject and commit to one capture effect; grain and slight noise are realism cues. COMMUNITY [C3, C4].
 - Write explicit exclusions; there is no negative-prompt parameter. OFFICIAL [CB2].
@@ -92,7 +97,7 @@ Specific cases:
 
 `count`: keep 1. Use more only when the user asks for options.
 
-`model` and `reasoning_effort` are optional. Leave them out by default: the MCP then uses the Codex config model with effort `low`. You may pass a stronger model and higher effort when you judge it worth it, mainly in `enhance` mode, where the model writes the final prompt. In `exact` mode the model only relays your text, so a stronger model does not change the image. TESTED: `gpt-6-astra` with `max` used about 4-6% of the 5h window per image, against about 1% with the default, with no better image. Valid values come from `codex_status`.
+`model` and `reasoning_effort` are optional. Leave them out by default: the MCP then uses the Codex config model with effort `low`. You may pass a stronger model and higher effort when you judge it worth it, mainly in `enhance` mode, where the model writes the final prompt. In `exact` mode the model only relays your text, so a stronger model does not change the image. TESTED once: `gpt-6-astra` with `max` cost about four times the quota with no better image. Valid values come from `codex_status`.
 
 `prompt_mode: "enhance"`: only when the user explicitly wants Codex to elaborate a vague idea. This is where a stronger `model` and a higher `reasoning_effort` can help (optional, see above). Check that the rewritten prompt shown in the result still matches the brief; if not, regenerate in exact mode.
 
@@ -108,9 +113,9 @@ Specific cases:
 
 ## 4. Review
 
-Inspect every returned image using the inline copy. Read the saved file only when the inline image is too small to judge text or fine detail (each Read sends the image again). Go through the whole checklist. One failure means the image is rejected.
+Inspect the inline copy first. Zoom only where it cannot settle a detail (small text, hands, device edges and buttons, logos, labels): crop the saved file into the scratchpad with Python and Pillow (or `sips` on macOS), combine up to two crops into one image, and Read that instead of the full file. Before describing or judging a detail of a reference image, crop and inspect the reference the same way. Go through the whole checklist. Objective failures (items 1-5, 9-12) reject the image; style items (6-8) reject it when realism or a specific look was asked.
 
-1. Brief: every requested element present, correct counts, positions, colors, style. Aspect ratio matches (check the size line in the result).
+1. Brief: every requested element and every inventory detail present, correct counts, positions, colors, style. Aspect ratio matches (check the size line in the result).
 2. Text: compare letter by letter. No missing, extra, garbled, or mirrored characters. Legible at the final size. Consistent typography.
 3. Anatomy: count fingers on every hand. Arms, legs, joints, eyes (aligned, same direction), teeth, ears. No fused or melted body parts.
 4. Physics and geometry: consistent perspective, lines straight where they must be, shadows and reflections matching the light and the objects, nothing floating or intersecting impossibly, products with their correct shape.
@@ -121,6 +126,7 @@ Inspect every returned image using the inline copy. Read the saved file only whe
 9. Reference fidelity: a logo or product from `reference_images` keeps its exact shape, colors, proportions, and lettering.
 10. Transparency, when requested: the result must say "alpha channel present", and the subject must be cleanly isolated with no painted checkerboard and no white fringe. "NO alpha channel" is a failure: retry with the transparency line restated. If it still has no alpha, deliver it and say so. "could not be checked": state it in the verdict. Never fake a cutout.
 11. Edits: everything outside the requested change is identical to the original. Compare both images.
+12. Domain: the Check items of the domain in [details.md](details.md).
 
 Final gate: would a senior art director approve this for a paying client without comments? Any hesitation is a no.
 
@@ -131,6 +137,7 @@ Report the verdict with concrete defects: "left hand has six fingers", "'CAFÉ' 
 - Budget: one attempt is one `generate_image` call. At most 3 attempts per request (first plus 2 retries), unless the user asks for more.
 - Each retry resends the full prompt with one targeted change per defect and keeps what worked. Never resend the same prompt.
 - If the image is good except for one area, edit it instead: pass it in `reference_images` with "Change only ..." and the preserve list.
+- Pixel-level fixes (crop, resize, remove a small element on a plain area, recolor a flat shape) can be done locally with Python/PIL instead of a new generation. Save to a new file and review the result like any other.
 - Read the usage limits at the end of each result. Stop retrying when the 5h or weekly window has less than 10% left, and tell the user. If the limits say "unavailable", call `codex_status` once; if still unavailable, continue and say the limit could not be checked.
 - Header "Generated N of M": review the N images as usual and say how many were delivered. Do not spend an attempt on the missing ones unless the user needs all M.
 - Errors:
