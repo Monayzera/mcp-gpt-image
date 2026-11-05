@@ -15,7 +15,7 @@ const pkg = createRequire(import.meta.url)("../package.json");
 const CLIENT_INFO = { name: "mcp-gpt-image", title: "MCP GPT Image", version: pkg.version };
 
 const SERVER_INSTRUCTIONS = [
-  "Generates and edits images with GPT Image through the local Codex CLI, using the user's ChatGPT login (no API key).",
+  "Generates and edits images and looping animated GIFs (gif parameter) with GPT Image through the local Codex CLI, using the user's ChatGPT login (no API key).",
   "Each image takes roughly 30-90 seconds. Write the complete final prompt yourself: in prompt_mode \"exact\" (default) Codex is told to pass it to GPT Image unchanged, and the result reports whether it did.",
   "There is no size parameter: state the aspect ratio in the prompt (for example \"16:9 landscape\").",
   "Results include the saved file paths and the usage limits Codex reports (5-hour and weekly windows).",
@@ -196,7 +196,7 @@ server.registerTool(
   {
     title: "Generate image (GPT Image via Codex)",
     description: [
-      "Generate or edit images with GPT Image through the local Codex CLI and return them inline, saved to disk.",
+      "Generate or edit images with GPT Image through the local Codex CLI and return them inline, saved to disk. It also creates looping animated GIFs: pass the gif parameter.",
       "Pass reference_images to edit existing images or to use them as style/subject references.",
       "Set background: true to get a job id at once and keep working; the images then come from get_image_result.",
       "Takes about 30-90 seconds per image. There is no size parameter: put the aspect ratio in the prompt (for example \"16:9 landscape\", \"square 1:1\", \"vertical 9:16\").",
