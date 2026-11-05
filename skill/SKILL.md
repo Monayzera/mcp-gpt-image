@@ -92,6 +92,7 @@ Rules that keep it from looking AI-made (tags as in styles.md):
 Specific cases:
 - Text in the image: exact text in quotes, font style, weight, color, position, then "render exactly this text, no extra characters". Spell rare words letter by letter. Keep text short. OFFICIAL [CB2].
 - Transparent background: set `transparent_background: true` and write "isolated subject on a fully transparent background, clean alpha edges, no backdrop, no checkerboard, no unwanted shadows". TESTED (PNG with alpha returned).
+- Animated GIF: pass `gif` (`{}` gives 9 frames of 200 ms; 2 to 16 frames). Describe one simple motion with a fixed camera that ends where it starts, so the loop is seamless. OFFICIAL [Codex PR #59073]. GIF has at most 256 colors, so flat or limited palettes hold up better than photos. To change an existing GIF, extract its frames with Pillow into a spritesheet (equal cells, regular grid) and pass that sheet in `reference_images` with `gif`; never pass the GIF itself. Needs Codex CLI 0.167.0-alpha.5 or newer; "GIF output is not enabled for this request" means OpenAI has not enabled it for this account yet.
 - Avoid names of living artists, real people, and trademarked characters or logos the user does not own. Policy refusals waste attempts.
 - If the result says the prompt differs from yours and a requirement changed (text, count, colors, aspect ratio), retry with that requirement restated. Otherwise accept and note it in the verdict.
 
@@ -127,6 +128,7 @@ Inspect the inline copy first. Zoom only where it cannot settle a detail (small 
 10. Transparency, when requested: the result must say "alpha channel present", and the subject must be cleanly isolated with no painted checkerboard and no white fringe. "NO alpha channel" is a failure: retry with the transparency line restated. If it still has no alpha, deliver it and say so. "could not be checked": state it in the verdict. Never fake a cutout.
 11. Edits: everything outside the requested change is identical to the original. Compare both images.
 12. Domain: the Check items of the domain in [details.md](details.md).
+13. GIF: the result line must say "Animated GIF" with the requested frame count. The inline copy shows only the first frame (OFFICIAL, Claude vision docs), so extract all frames into one contact sheet with Pillow and Read that to judge the motion.
 
 Final gate: would a senior art director approve this for a paying client without comments? Any hesitation is a no.
 

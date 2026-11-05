@@ -52,3 +52,7 @@ Open the section for the subject's domain (several when the image mixes them). P
 ## Streets and cities
 - **Include**: region-specific details (sidewalk paving, poles and wires, signage style, plate format, which side traffic drives on), weather traces, vehicles and clothes of the right era, people at the right scale.
 - **Check**: gibberish signs, duplicated cars or people, traffic on the wrong side for the country.
+
+## Animated GIFs
+- **Include**: one subject doing one simple action; a fixed camera and identical framing in every frame; the last frame leading back into the first; a limited palette; the frame count and speed that fit the motion.
+- **Check**: the subject changing identity or size between frames, flicker in the background, a jump at the loop point, a frame count different from the one asked.
