@@ -29,7 +29,7 @@ npx -y github:Monayzera/mcp-gpt-image setup
 
 This does three things:
 
-1. Copies the skill (`SKILL.md`, `styles.md` and `details.md`) to `~/.claude/skills/gpt-image/` (or `$CLAUDE_CONFIG_DIR/skills/gpt-image/`).
+1. Copies the skill (`SKILL.md`, `styles.md`, `details.md` and `gif_tools.py`) to `~/.claude/skills/gpt-image/` (or `$CLAUDE_CONFIG_DIR/skills/gpt-image/`).
 2. Registers the MCP server in Claude Code at user scope, as `npx -y github:Monayzera/mcp-gpt-image` (on Windows, wrapped in `cmd /c`). If `CODEX_PATH` is set, it is passed to the server. An existing `gpt-image` entry at user scope is left unchanged; one in another scope is reported so you can remove it.
 3. Checks that Codex is installed and signed in.
 

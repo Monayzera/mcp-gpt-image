@@ -55,4 +55,4 @@ Open the section for the subject's domain (several when the image mixes them). P
 
 ## Animated GIFs
 - **Include**: one subject doing one simple action; a fixed camera and identical framing in every frame; the last frame leading back into the first; a limited palette; the frame count and speed that fit the motion.
-- **Check**: the subject changing identity or size between frames, flicker in the background, a jump at the loop point, a frame count different from the one asked.
+- **Check**: the subject changing identity or size between frames, flicker in the background, a jump at the loop point, a frame count different from the one asked, double images or soft edges after smoothing.
