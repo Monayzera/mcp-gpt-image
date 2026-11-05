@@ -81,6 +81,7 @@ Tamanho e proporção não são parâmetros. Eles vão no prompt: "16:9" gerou 1
 | `model` | config do Codex | Modelo de chat do Codex que faz a ponte. Não escolhe o modelo de imagem. |
 | `reasoning_effort` | `low` no modo exact, se o modelo aceitar | Esforço de raciocínio desse modelo. |
 | `output_path` | `<projeto>/generated-images/` | Pasta ou caminho de arquivo. O nome é mantido; a extensão segue o formato devolvido (PNG). |
+| `gif` | nenhum | GIF animado em vez de imagem parada: `{}` para 9 quadros de 200 ms, ou `frame_count` (2-16) e `frame_duration_ms` (20-2000). Precisa do Codex CLI 0.167.0-alpha.5 ou mais novo e da OpenAI liberar GIF para sua conta. |
 | `background` | `false` | Devolve um id de job na hora e continua gerando; o resultado sai pelo `get_image_result`. |
 
 O resultado lista cada caminho salvo com o tamanho, o prompt que chegou ao GPT Image (quando o Codex o informa), a checagem de alpha quando houve pedido de transparência e os limites de uso informados pelo Codex (janela de 5 horas e semanal).
