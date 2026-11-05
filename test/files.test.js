@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { detectFormat, expandHome, hasAlpha, imageSize, planTargets, resolveReferenceImages, slugify, timestamp, writeUnique } from "../src/files.js";
+import { detectFormat, expandHome, gifInfo, hasAlpha, imageSize, planTargets, resolveReferenceImages, slugify, timestamp, writeUnique } from "../src/files.js";
 import { jpegSegment, makeGif, makeJpeg, makePng, makeWebp, pngChunk } from "./fixtures/images.js";
 
 let tmp;
@@ -541,5 +541,46 @@ describe("resolveReferenceImages", () => {
   it("fails on the first invalid entry without returning partial results", async () => {
     await write("ok.png", makePng());
     await assert.rejects(resolveReferenceImages(["ok.png", "missing.png"], tmp), /not found/);
+  });
+});
+
+function animatedGif(delays) {
+  const parts = [Buffer.from("GIF89a", "ascii"), Buffer.from([4, 0, 3, 0, 0, 0, 0])];
+  for (const d of delays) {
+    parts.push(Buffer.from([0x21, 0xf9, 0x04, 0x00, d & 0xff, d >> 8, 0x00, 0x00]));
+    parts.push(Buffer.from([0x2c, 0, 0, 0, 0, 4, 0, 3, 0, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00]));
+  }
+  parts.push(Buffer.from([0x3b]));
+  return Buffer.concat(parts);
+}
+
+describe("gifInfo", () => {
+  it("counts frames and sums the loop duration", () => {
+    assert.deepEqual(gifInfo(animatedGif([15, 15, 15])), { frames: 3, durationMs: 450 });
+  });
+
+  it("reads a single-frame GIF as one frame", () => {
+    assert.deepEqual(gifInfo(animatedGif([0])), { frames: 1, durationMs: 0 });
+  });
+
+  it("returns null for a GIF without image blocks", () => {
+    assert.equal(gifInfo(makeGif()), null);
+  });
+
+  it("ignores a truncated last frame", () => {
+    const full = animatedGif([10, 10]);
+    assert.deepEqual(gifInfo(full.subarray(0, full.length - 4)), { frames: 1, durationMs: 200 });
+  });
+
+  it("skips a NETSCAPE loop extension", () => {
+    const gif = animatedGif([20, 20]);
+    const loop = Buffer.from([0x21, 0xff, 0x0b, ...Buffer.from("NETSCAPE2.0", "ascii"), 0x03, 0x01, 0x00, 0x00, 0x00]);
+    const withLoop = Buffer.concat([gif.subarray(0, 13), loop, gif.subarray(13)]);
+    assert.deepEqual(gifInfo(withLoop), { frames: 2, durationMs: 400 });
+  });
+
+  it("returns null for non-GIF data", () => {
+    assert.equal(gifInfo(makePng()), null);
+    assert.equal(gifInfo(Buffer.from("nope")), null);
   });
 });

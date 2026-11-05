@@ -253,6 +253,22 @@ describe("MCP server over stdio", { skip: process.platform === "win32" }, () => 
     });
   });
 
+  it("generate_image with gif enables the Codex animation feature for that thread only", async () => {
+    await withServer("ok", {}, async ({ client, logFile }) => {
+      const result = await client.callTool({ name: "generate_image", arguments: { prompt: "A cat blinking", gif: { frame_count: 8 } } });
+      assert.notEqual(result.isError, true, textOf(result));
+      const starts = (await readLog(logFile)).filter(m => m.method === "thread/start");
+      assert.deepEqual(starts[0].params.config, { features: { image_generation_animation: true } });
+      assert.match(starts[0].params.developerInstructions, /set gif to \{"frame_count":8\}/);
+      assert.match(textOf(result), /GIF requested, but this image is a still image\/png/);
+      const plain = await client.callTool({ name: "generate_image", arguments: { prompt: "A cat" } });
+      assert.notEqual(plain.isError, true, textOf(plain));
+      const second = (await readLog(logFile)).filter(m => m.method === "thread/start")[1];
+      assert.equal(second.params.config, undefined);
+      assert.doesNotMatch(textOf(plain), /GIF/);
+    });
+  });
+
   it("generate_image uses GPT_IMAGE_MODEL and GPT_IMAGE_EFFORT when the call omits them", async () => {
     await withServer("ok", { GPT_IMAGE_MODEL: "m-default", GPT_IMAGE_EFFORT: "high" }, async ({ client, logFile }) => {
       const result = await client.callTool({ name: "generate_image", arguments: { prompt: "A red fox" } });

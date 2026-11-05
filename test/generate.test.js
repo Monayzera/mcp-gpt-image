@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
-import { buildInstructions, chooseEffort, envDefaults, generateImages, TURN_TIMEOUT_MS, validateModel, withEnvDefaults } from "../src/generate.js";
+import { buildInstructions, chooseEffort, envDefaults, generateImages, gifOptions, TURN_TIMEOUT_MS, validateModel, withEnvDefaults } from "../src/generate.js";
 import { makeGif, makeJpeg, makePng } from "./fixtures/images.js";
 import { cleanup, makeTmp, session, waitFor } from "./support.js";
 
@@ -953,5 +953,21 @@ describe("envDefaults and withEnvDefaults", () => {
 
   it("leaves model and effort undefined without env values", () => {
     assert.deepEqual(withEnvDefaults({ prompt: "p" }, {}), { prompt: "p", model: undefined, reasoning_effort: undefined });
+  });
+});
+
+describe("gif options and instructions", () => {
+  it("gifOptions keeps only the given fields and maps undefined to null", () => {
+    assert.equal(gifOptions(undefined), null);
+    assert.deepEqual(gifOptions({}), {});
+    assert.deepEqual(gifOptions({ frame_count: 8 }), { frame_count: 8 });
+    assert.deepEqual(gifOptions({ frame_count: 8, frame_duration_ms: 150 }), { frame_count: 8, frame_duration_ms: 150 });
+  });
+
+  it("buildInstructions tells Codex to pass the gif options only when asked", () => {
+    const withGif = buildInstructions({ mode: "exact", count: 1, transparent: false, hasReferences: false, gif: { frame_count: 8 } });
+    assert.match(withGif, /set gif to \{"frame_count":8\} so the result is an animated GIF/);
+    const without = buildInstructions({ mode: "exact", count: 1, transparent: false, hasReferences: false });
+    assert.doesNotMatch(without, /gif/i);
   });
 });
