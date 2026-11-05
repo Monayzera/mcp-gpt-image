@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import os from "node:os";
-import { detectFormat, hasAlpha, imageSize, planTargets, resolveReferenceImages, writeUnique } from "./files.js";
+import { detectFormat, gifInfo, hasAlpha, imageSize, planTargets, resolveReferenceImages, writeUnique } from "./files.js";
 import { localDateTime } from "./format.js";
 
 export function envDefaults(env = process.env) {
@@ -29,7 +29,17 @@ const RULES = [
   "- When every call has finished, reply with the single word DONE. If the tool is unavailable or refuses, reply with one short sentence explaining why.",
 ];
 
-export function buildInstructions({ mode, count, transparent, hasReferences }) {
+export const GIF_HINT = "Animated GIF output needs Codex CLI 0.167.0-alpha.5 or newer (npm install -g @openai/codex@alpha until a stable release has it) and OpenAI enabling GIF for your account; \"GIF output is not enabled for this request\" means the account is not enabled yet.";
+
+export function gifOptions(gif) {
+  if (!gif) return null;
+  const options = {};
+  if (gif.frame_count !== undefined) options.frame_count = gif.frame_count;
+  if (gif.frame_duration_ms !== undefined) options.frame_duration_ms = gif.frame_duration_ms;
+  return options;
+}
+
+export function buildInstructions({ mode, count, transparent, hasReferences, gif = null }) {
   const calls =
     count > 1
       ? `exactly ${count} times, one separate call per image (never one call asking for several images)`
@@ -53,6 +63,7 @@ export function buildInstructions({ mode, count, transparent, hasReferences }) {
     );
   }
   lines.push(`In every call, set transparent_background to ${transparent ? "true" : "false"}.`);
+  if (gif) lines.push(`In every call, set gif to ${JSON.stringify(gif)} so the result is an animated GIF.`);
   if (hasReferences) {
     lines.push(
       "The user's message has attached images. They are the input images for the generation (images to edit, or references for style, subject, or composition). Use them as the tool's input images. Do not describe them."
@@ -154,14 +165,16 @@ export async function generateImages({ client, params, baseDir, signal, onProgre
     } catch {}
   };
 
+  const gif = gifOptions(params.gif);
   const threadParams = {
     ephemeral: true,
     sandbox: "read-only",
     approvalPolicy: "never",
     cwd: os.tmpdir(),
-    developerInstructions: buildInstructions({ mode, count, transparent, hasReferences: references.length > 0 }),
+    developerInstructions: buildInstructions({ mode, count, transparent, hasReferences: references.length > 0, gif }),
   };
   if (params.model) threadParams.model = params.model;
+  if (gif) threadParams.config = { features: { image_generation_animation: true } };
 
   const thread = await client.request("thread/start", threadParams, { timeoutMs: 60_000 });
   const threadId = thread?.thread?.id;
@@ -248,6 +261,7 @@ export async function generateImages({ client, params, baseDir, signal, onProgre
         describeTurnError(turn?.error) ?? describeTurnError(lastError),
         ...failures,
         agentText && agentText.trim() !== "DONE" ? `Codex said: ${agentText.trim()}` : null,
+        gif ? GIF_HINT : null,
       ].filter(Boolean);
       throw new Error(`Codex finished without generating an image.${reasons.length ? `\n${reasons.join("\n")}` : ""}`);
     }
@@ -274,6 +288,7 @@ export async function generateImages({ client, params, baseDir, signal, onProgre
           bytes: buffer.length,
           size: imageSize(buffer),
           alpha: hasAlpha(buffer),
+          animation: gifInfo(buffer),
           revisedPrompt,
           verbatim: revisedPrompt === null ? null : normalizePrompt(revisedPrompt) === normalizePrompt(prompt),
         });
@@ -291,6 +306,7 @@ export async function generateImages({ client, params, baseDir, signal, onProgre
       effort,
       mode,
       transparent,
+      gifRequested: Boolean(gif),
       durationMs: Date.now() - startedAt.getTime(),
     };
   } finally {

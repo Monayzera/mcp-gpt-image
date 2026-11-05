@@ -8,7 +8,7 @@ import { z } from "zod";
 import { closeAppServer, getAppServer } from "./app-server.js";
 import { formatRateLimits } from "./format.js";
 import { resolveReferenceImages } from "./files.js";
-import { envDefaults, generateImages, withEnvDefaults } from "./generate.js";
+import { envDefaults, generateImages, GIF_HINT, withEnvDefaults } from "./generate.js";
 import { CodexNotFoundError, findCodex, INSTALL_HINT } from "./locate.js";
 
 const pkg = createRequire(import.meta.url)("../package.json");
@@ -91,6 +91,13 @@ async function runGeneration(args, { signal, onProgress } = {}) {
         lines.push(`Prompt that reached GPT Image${note}:\n${img.revisedPrompt}`);
       } else {
         lines.push("Prompt that reached GPT Image: not reported by Codex.");
+      }
+      if (img.animation && (img.animation.frames > 1 || result.gifRequested)) {
+        lines.push(`Animated GIF: ${img.animation.frames} frame${img.animation.frames === 1 ? "" : "s"}, ${img.animation.durationMs} ms total.`);
+      } else if (result.gifRequested && img.mimeType === "image/gif") {
+        lines.push("GIF requested; the frame count could not be read from the file.");
+      } else if (result.gifRequested) {
+        lines.push(`GIF requested, but this image is a still ${img.mimeType}. ${GIF_HINT}`);
       }
       if (result.transparent) {
         if (img.alpha === true) lines.push("Transparent background: alpha channel present.");
@@ -228,6 +235,13 @@ server.registerTool(
         .min(1)
         .optional()
         .describe("Where to save: a directory, or a file path such as hero.png (the name is kept; the extension follows the format returned, normally PNG). Relative paths resolve against the project directory; ~ is expanded. Default: <project>/generated-images/. Existing files are never overwritten; a numeric suffix is added instead."),
+      gif: z
+        .object({
+          frame_count: z.number().int().min(2).max(16).optional().describe("Frames in the loop, 2-16. Default 9."),
+          frame_duration_ms: z.number().int().min(20).max(2000).optional().describe("Milliseconds per frame, 20-2000. Default 200."),
+        })
+        .optional()
+        .describe("Create a looping animated GIF instead of a still image. Pass {} for the defaults (9 frames, 200 ms each). Keep the motion simple and describe it in the prompt. Needs Codex CLI 0.167.0-alpha.5 or newer."),
       background: z
         .boolean()
         .default(false)

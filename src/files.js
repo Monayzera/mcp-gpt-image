@@ -8,6 +8,40 @@ export function expandHome(p) {
   return p;
 }
 
+export function gifInfo(buffer) {
+  if (detectFormat(buffer)?.mime !== "image/gif" || buffer.length < 13) return null;
+  try {
+    let i = 13;
+    if (buffer[10] & 0x80) i += 3 * 2 ** ((buffer[10] & 0x07) + 1);
+    let frames = 0;
+    let durationMs = 0;
+    while (i < buffer.length) {
+      const block = buffer[i];
+      if (block === 0x3b) break;
+      if (block === 0x21) {
+        if (buffer[i + 1] === 0xf9 && i + 5 < buffer.length) durationMs += buffer.readUInt16LE(i + 4) * 10;
+        i += 2;
+        while (i < buffer.length && buffer[i] !== 0) i += buffer[i] + 1;
+        i += 1;
+      } else if (block === 0x2c) {
+        const packed = buffer[i + 9];
+        i += 10;
+        if (packed & 0x80) i += 3 * 2 ** ((packed & 0x07) + 1);
+        i += 1;
+        while (i < buffer.length && buffer[i] !== 0) i += buffer[i] + 1;
+        if (i >= buffer.length) break;
+        i += 1;
+        frames += 1;
+      } else {
+        break;
+      }
+    }
+    return frames ? { frames, durationMs } : null;
+  } catch {
+    return null;
+  }
+}
+
 export function hasAlpha(buffer) {
   const format = detectFormat(buffer);
   if (format?.mime !== "image/png" || buffer.length < 26) return null;
